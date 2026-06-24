@@ -33,7 +33,7 @@ def amplitude(coeffs, breakpoints):
 
     Args:
         coeffs: np.ndarray of shape (K + 1, 4) of monomial coefficents.
-        breakpoints: np.ndarray of shape (K + 2,) of interior knots.
+        breakpoints: np.ndarray of shape (K + 2,) of interior knots
             plus boundaries.
     Returns: 
         A: scalar amplitude of the spline
@@ -126,7 +126,7 @@ def absolute_thresholds(upsilon_rel_1, upsilon_rel_2, A, T):
         upsilon_2 (float): scalar absolute curvature significance threshold
     """
     upsilon_1 = upsilon_rel_1*A/T
-    upsilon_2 = 2*upsilon_rel_2*A/(T**2)
+    upsilon_2 = upsilon_rel_2*A/(T**2)
     return upsilon_1, upsilon_2
 
 

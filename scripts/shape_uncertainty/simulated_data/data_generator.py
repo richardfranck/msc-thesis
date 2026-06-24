@@ -1,3 +1,4 @@
+import numpy as np
 
 def sample_covariates(D, ranges, rng):
     """Draw observed static covariates for D samples.
@@ -321,17 +322,17 @@ class SimulatedDataset:
 
     @property
     def T(self):
-        """Time horizon, from the generative config."""
+        """Return the time horizon, from the generative config."""
         return self.gen_config.get("T")
 
     @property
     def sigma(self):
-        """Measurement-noise std, from the generative config."""
+        """Return the measurement-noise std, from the generative config."""
         return self.gen_config.get("sigma")
 
     @property
     def hyperparams(self):
-        """Generative hyperparameters, from the generative config."""
+        """Return the generative hyperparameters, from the generative config."""
         return self.gen_config.get("hyperparams", {})
 
     def model_inputs(self):
@@ -369,16 +370,14 @@ def simulate_dataset(
     SimulatedDataset holding both the model-visible data and the
     withheld ground truth. The pipeline is:
 
-        1. draw observed covariates (size, age, weight, dosage),
-        2. draw independent latent factors (z_g, z_d),
-        3. map covariates + latents to parameters (g, d, rho),
-        4. build per-individual observation times on [0, T],
-        5. evaluate the noise-free Wilkerson trajectory at those times,
-        6. add i.i.d. N(0, sigma^2) measurement noise.
+        1. Draw observed covariates (size, age, weight, dosage),
+        2. Draw independent latent factors (z_g, z_d),
+        3. Map covariates + latents to parameters (g, d, rho),
+        4. Build per-individual observation times on [0, T],
+        5. Evaluate the noise-free Wilkerson trajectory at those times,
+        6. Add i.i.d. N(0, sigma^2) measurement noise.
 
-    A single random number generator (rng) is created from `seed` and 
-    threaded through every stochastic step, so the whole dataset is 
-    reproducible from `seed` together with the other generative arguments. 
+    Things to note:
         - Setting alpha_g = alpha_d = 0 (in hyperparams)
             removes unobserved heterogeneity; 
         - Setting sigma = 0 removes measurement noise.
