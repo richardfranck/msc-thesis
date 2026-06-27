@@ -23,7 +23,7 @@ def amplitude(coeffs, breakpoints):
     """Return the peak-to-peak amplitude of the spline. 
 
     Given the matrix of monomial coefficents and array of
-    breakpoints, i.e. [0, \xi_1, ..., \xi_K, T], return the 
+    breakpoints, i.e. [0, xi_1, ..., xi_K, T], return the 
     peak-to-peak amplitude of the spline. This is needed to
     set the significance thresholds upsilon_1 and upsilon_2 used
     for the shape state assignments.
@@ -39,8 +39,8 @@ def amplitude(coeffs, breakpoints):
         A: scalar amplitude of the spline
     """
     unique_knots = np.unique(breakpoints)
-    t_start = unique_knots[:-1]  # Shape: (K + 1,): Left global knot \xi_k
-    t_end = unique_knots[1:]     # Shape: (K + 1,):  Right global knot \xi_{k+1}
+    t_start = unique_knots[:-1]  # Shape: (K + 1,): Left global knot xi_k
+    t_end = unique_knots[1:]     # Shape: (K + 1,):  Right global knot xi_{k+1}
 
     c0 = coeffs[:, 0] 
     c1 = coeffs[:, 1]
@@ -126,7 +126,7 @@ def absolute_thresholds(upsilon_rel_1, upsilon_rel_2, A, T):
         upsilon_2 (float): scalar absolute curvature significance threshold
     """
     upsilon_1 = upsilon_rel_1*A/T
-    upsilon_2 = upsilon_rel_2*A/(T**2)
+    upsilon_2 = 2*upsilon_rel_2*A/(T**2)
     return upsilon_1, upsilon_2
 
 
@@ -145,8 +145,8 @@ def piece_flags(coeffs, breakpoints, upsilon_1, upsilon_2):
         curvature_flat: np.ndarray of shape (K + 1, ) of boolean flags
     """
     unique_knots = np.unique(breakpoints)
-    t_start = unique_knots[:-1]  # Shape: (K + 1,): Left global knot \xi_k
-    t_end = unique_knots[1:]     # Shape: (K + 1,):  Right global knot \xi_{k+1}
+    t_start = unique_knots[:-1]  # Shape: (K + 1,): Left global knot xi_k
+    t_end = unique_knots[1:]     # Shape: (K + 1,):  Right global knot xi_{k+1}
 
     c0 = coeffs[:, 0] 
     c1 = coeffs[:, 1]
@@ -219,7 +219,7 @@ def candidate_roots(coeffs, breakpoints, slope_flat, curvature_flat, knot_tol=1e
 
     For each piecewise cubic, respectively, we find the roots of the first- and 
     second-order derivatives. We retain only those roots strictly within the 
-    open interval (\xi_k, \xi_{k+1}). We further discard roots of the first
+    open interval (xi_k, xi_{k+1}). We further discard roots of the first
     derivative where the piece flags mark an interval as linear and roots of the 
     second derivative where the piece flags mark an interval as constant. 
     We also discard double roots of the first derivative since those concide
