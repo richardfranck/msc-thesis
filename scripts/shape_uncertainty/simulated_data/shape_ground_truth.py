@@ -1,5 +1,6 @@
-from scripts.shape_extraction.shape_summary import merge_adjacent
 import numpy as np
+
+from scripts.shape_uncertainty.shape_extraction.shape_summary import merge_adjacent
 
 def _compute_true_curve_amplitude(size, g, d, rho, T, t_star):
     """Compute exact peak-to-peak amplitude of the convex Wilkerson curve on [0, T].

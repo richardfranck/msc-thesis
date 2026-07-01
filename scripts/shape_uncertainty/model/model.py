@@ -1,6 +1,7 @@
 import math
 import torch
 import torch.nn as nn
+from abc import ABC, abstractmethod
 
 
 ACTIVATIONS = {
@@ -105,7 +106,7 @@ class Encoder(nn.Module):
 class RandomEffectsModel(nn.Module, ABC):
     """Abstract base class for a spline forecasting model with random effects.
 
-    This class defines the randome effects model structure that is shared by
+    This class defines the random effects model structure that is shared by
     by all model variants, irrespective of their specific assumption regarding
     the distribution of the random effects. That is:
         y_i = Phi_i (h_theta(x_i) + u_i) + epsilon_i,
@@ -253,7 +254,7 @@ class GaussianModel(RandomEffectsModel):
         L[range(B), range(B)] = torch.exp(self.log_diag)
 
         # Replace the lower triangular part with the elements a_ij of self.offdiag.
-        L[self._tril_row, self._tril_col] = self.offdiag
+        L[self._row_indices, self._col_indices] = self.offdiag
 
         return L
 
@@ -293,7 +294,7 @@ class GaussianModel(RandomEffectsModel):
         # Get the marginal covariance V_i = Phi_i Sigma Phi_i^T + sigma^2 I.
         N_i = y_i.shape[0]
         identity_N_i = torch.eye(N_i, dtype=y_i.dtype, device=y_i.device)
-        V_i = Phi_i @ Sigma @ Phi_i.T + self.noise_variance() * identity_N_i
+        V_i = Phi_i @ Sigma @ Phi_i.T + self.get_noise_variance() * identity_N_i
 
         # Create a multivariate normal distribution parameterised by the mean vector mu_i and the covariance matrix V_i.
         dist = torch.distributions.MultivariateNormal(mu_i, covariance_matrix=V_i)
