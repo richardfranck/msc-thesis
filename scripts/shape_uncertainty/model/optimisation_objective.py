@@ -2,8 +2,13 @@ import numpy as np
 import torch
 
 def negative_log_likelihood(model, batch):
-    """Compute the summed negative marginal log-likelihood over the batch.
+    """Compute the average (per-individual) negative marginal log-likelihood over the batch.
 
+    We compute the average negative log likelihood where we average
+    over individuals (not observations). This is key so in the overall
+    loss function the the likelihood/penalty balance is invariant to the
+    number of individuals D and to the mini-batch size.
+    
     Args:
         model: a RandomEffectsModel (e.g. GaussianModel); supplies
             marginal_log_likelihood(y_i, Phi_i, x_i).
@@ -17,7 +22,8 @@ def negative_log_likelihood(model, batch):
         # Subtract each individual's marginal log-likelihood (sum of NLLs over the batch)
         total = total - model.marginal_log_likelihood(
             batch.y_list[i], batch.Phi_list[i], batch.x_list[i])
-    return total
+    average = total / batch.D
+    return average
 
 
 def wiggle_penalty(model, Omega, X, lambda_mean, lambda_re):
