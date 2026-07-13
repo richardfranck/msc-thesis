@@ -53,7 +53,7 @@ class Encoder(nn.Module):
         activation_class = ACTIVATIONS[activation]
 
         self.hidden_layers = nn.ModuleList()
-        self.batch_norms = nn.ModuleList()
+        self.layer_norms = nn.ModuleList()
         self.activations = nn.ModuleList()
         self.dropouts = nn.ModuleList()
 
@@ -61,7 +61,7 @@ class Encoder(nn.Module):
 
         for hidden_dim in hidden_sizes:
             self.hidden_layers.append(nn.Linear(in_dim, hidden_dim))
-            self.batch_norms.append(nn.BatchNorm1d(hidden_dim))
+            self.layer_norms.append(nn.LayerNorm(hidden_dim))
             self.activations.append(activation_class())
             self.dropouts.append(nn.Dropout(dropout) if dropout > 0.0 else nn.Identity())
 
@@ -86,15 +86,15 @@ class Encoder(nn.Module):
         """
         layers = zip(
             self.hidden_layers,
-            self.batch_norms,
+            self.layer_norms,
             self.activations,
             self.dropouts,
         )
 
         # Pass data through the layers
-        for linear, batch_norm, activation, dropout in layers:
+        for linear, layer_norm, activation, dropout in layers:
             X = linear(X)
-            X = batch_norm(X)
+            X = layer_norm(X)
             X = activation(X)
             X = dropout(X)
 
@@ -150,8 +150,33 @@ class RandomEffectsModel(nn.Module, ABC):
         return torch.exp(self.log_sigma)
 
     def get_noise_variance(self):
-        """Return th measurement-noise variance sigma^2."""
+        """Return the measurement-noise variance sigma^2."""
         return torch.exp(2.0 * self.log_sigma)
+
+    def mean_wiggle(self, X, Omega):
+        """Compute the mean-trajectory wiggle, averaged over the batch.
+
+        Compute the integrated squared second derivative of each individual's MEAN
+        predicted trajectory. That is, the mean over individuals of 
+                    h_theta(x_i)^T Omega h_theta(x_i)
+        Depends on theta only
+
+        Args:
+            X: torch.Tensor of shape (D, M); the batch of (normalised) covariates.
+            Omega: torch.Tensor of shape (B, B); the spline penalty matrix
+                (Omega = integral of phi''(t) phi''(t)^T dt).
+
+        Returns:
+            scalar torch.Tensor; the batch-averaged mean-trajectory wiggle.
+        """
+        # Mean coefficients for the whole batch
+        H = self.encoder(X) # (D, B)
+
+        # Quadratic form h_i^T Omega h_i for every individual and take the mean
+        wiggle_per_individual = (H @ Omega * H).sum(dim=1) # (D,)
+        mean_wiggle = wiggle_per_individual.mean() # scalar
+
+        return mean_wiggle
 
     @abstractmethod
     def marginal_log_likelihood(self, y_i, Phi_i, x_i):
@@ -302,31 +327,6 @@ class GaussianModel(RandomEffectsModel):
         # Return log p(y_i|x_i) using the multivariate Gaussian avaluated at the observed y_i.
         return dist.log_prob(y_i)
 
-    def mean_wiggle(self, X, Omega):
-        """Mean-trajectory wiggle, averaged over the batch.
-
-        Compute the integrated squared second derivative of each individual's MEAN
-        predicted trajectory. That is, the mean over individuals of 
-                    h_theta(x_i)^T Omega h_theta(x_i)
-        Depends on theta only
-
-        Args:
-            X: torch.Tensor of shape (D, M); the batch of (normalised) covariates.
-            Omega: torch.Tensor of shape (B, B); the spline penalty matrix
-                (Omega = integral of phi''(t) phi''(t)^T dt).
-
-        Returns:
-            scalar torch.Tensor; the batch-averaged mean-trajectory wiggle.
-        """
-        # Mean coefficients for the whole batch
-        H = self.encoder(X) # (D, B)
-
-        # Quadratic form h_i^T Omega h_i for every individual and take the mean
-        wiggle_per_individual = (H @ Omega * H).sum(dim=1) # (D,)
-        mean_wiggle = wiggle_per_individual.mean() # scalar
-
-        return mean_wiggle
-
     def re_wiggle(self, Omega):
         """Random-effects wiggle tr(Omega Sigma).
 
@@ -358,6 +358,82 @@ class GaussianModel(RandomEffectsModel):
         """
         return (lambda_mean * self.mean_wiggle(X, Omega)
                 + lambda_re * self.re_wiggle(Omega))
+
+
+class MeanOnlyModel(RandomEffectsModel):
+    """A penalised-MSE model baseline.
+
+    This class implements a MSE-loss baseline model with wiggle penalty. 
+    We obtain the MSE model case from the random effects base class as a
+    result of two choices:
+        1. We set the random effects to u_i = 0. 
+        2. We fix the noise variance sigma to be a constant. 
+    Thus, we have 
+            y_i | x_i ~ N(Phi_i h_theta(x_i), sigma^2 I).
+    The NLL objective then is a scaled residual sum of squares plus a 
+    log-noise constant. With sigma held constant, minimising this over theta 
+    is equivalent to minimising the MSE objective.
+
+    Args:
+        encoder: an Encoder instance.
+        nr_basis (int): number B of spline basis functions.
+        sigma_init (float): strictly positive initial measurement-noise std.
+    """
+    def __init__(self, encoder, nr_basis):
+        super().__init__(encoder, nr_basis, sigma_init=1/math.sqrt(2))
+        
+        self.log_sigma.requires_grad_(False)
+
+    def marginal_log_likelihood(self, y_i, Phi_i, x_i):
+        """MSE loss objective for one individual.
+
+        This function implements the MSE loss objective for one individual 
+        as used in the Timeview model. That is, the loss is AVERAGED over the N_i 
+        observations (not summed). Additionally it is averaged over the D samples
+        in negative_log_likelihood in optimisation_objective.py. 
+
+        Args:
+            y_i: torch.Tensor of shape (N_i,); the individual's observed
+                trajectory values at its observation times.
+            Phi_i: torch.Tensor of shape (N_i, B); the B-spline design matrix
+                evaluated at the individual's observation times.
+            x_i: torch.Tensor of shape (M,); the individual's static covariates.
+
+        Returns:
+            scalar torch.Tensor; the MSE loss (up to a constant)
+        """
+        # Get the mean spline coefficients h_theta(x_i).
+        h = self.encoder(x_i.unsqueeze(0)).squeeze(0)  # (M,) -> (1, M) -> (1, B) -> (B,)
+
+        # Get the mean trajectory mu_i = Phi_i h_theta(x_i) at the N_i observation times.
+        mu_i = Phi_i @ h
+        
+        # Create independent univariate normal distributions centered at mu_i with a fixed std dev 
+        # for each of the N_i observations of the given individual i.
+        dist = torch.distributions.Normal(mu_i, self.get_noise_std())
+        
+        # Compute the log-likelihood for each of the N_i observations.
+        log_prob = dist.log_prob(y_i) # (N_i,)
+
+        # Average the log-likelihood over the N_i observations for this individual.
+        log_prob_avg = log_prob.mean() # scalar
+
+        return log_prob_avg
+
+
+    def penalty(self, Omega, X, lambda_mean, lambda_re=0):
+        """Compute a mean-trajectory roughness penalty. 
+
+        Args:
+            Omega: torch.Tensor of shape (B, B); the spline penalty matrix.
+            X: torch.Tensor of shape (D, M); the batch of covariates.
+            lambda_mean: float, weight on the mean-trajectory wiggles.
+            lambda_re: float, weight on the random-effects wiggles (not used).
+
+        Returns:
+            scalar torch.Tensor; the mean trajectory wiggle penalty.
+        """
+        return lambda_mean * self.mean_wiggle(X, Omega)
 
 
 class MixtureModel:
