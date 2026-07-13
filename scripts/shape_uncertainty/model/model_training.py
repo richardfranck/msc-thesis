@@ -10,24 +10,28 @@ def _make_optimiser(model, lr, weight_decay):
     """Adam with L2 weight decay on the ENCODER parameters only.
 
     Initialise the Adam optimiser with L2 regularisation on the
-    NN parameters only and not on the random effects parameters. 
+    NN parameters only and not on any other parameters
+    (e.g random effects parameters).
 
     Args:
-        model: a GaussianModel (exposes encoder, log_sigma, offdiag, log_diag).
+        model: a RandomEffects model.
         lr: float, learning rate.
         weight_decay: float, L2 weight decay applied to the encoder only.
 
     Returns:
         torch.optim.Adam configured with the two parameter groups.
     """
-    # The random effects paras are the (1) measurement-noise log std dev, 
-    # (2) off-diagonal Cholesky paras of Sigma, (3) log-diagonal Cholesky paras of Sigma
-    random_effects_paras = [model.log_sigma, model.offdiag, model.log_diag]
-    
+    # Separate encoder paramerers from all other parameters
+    encoder_param_ids = {id(p) for p in model.encoder.parameters()}
+    other_paras = [
+        p for p in model.parameters()
+        if id(p) not in encoder_param_ids and p.requires_grad
+    ]
+
     # Initialise the Adam optimiser with L2 regularisaton only on the NN parameters.
     optimiser = torch.optim.Adam([
         {"params": model.encoder.parameters(), "weight_decay": weight_decay},
-        {"params": random_effects_paras, "weight_decay": 0.0},
+        {"params": other_paras, "weight_decay": 0.0},
     ], lr=lr)
 
     return optimiser
