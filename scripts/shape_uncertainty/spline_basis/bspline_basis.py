@@ -1,5 +1,6 @@
 from scipy import interpolate, special
 import numpy as np
+import torch
 
 
 def make_knots(n_interior, T, degree=3):
@@ -150,7 +151,7 @@ def penalty_matrix(basis_functions, knots):
             quadrature).
 
     Returns:
-        Omega: np.ndarray of shape (B, B), symmetric PSD,
+        Omega: torch.Tensor of shape (B, B), symmetric PSD,
             B = len(basis_functions).
     """
     # Standard Gauss-Lagrange nodes and weights
@@ -192,10 +193,10 @@ def penalty_matrix(basis_functions, knots):
         weights_i = np.asarray(shifted_weights[i]) # (2, )
         omega += weights_i[0] * f_node1 + weights_i[1] * f_node2
 
-    return omega
+    return torch.as_tensor(omega, dtype=torch.float64)
 
 
-def monomial_coefficents(basis_functions, knots):
+def monomial_coefficients(basis_functions, knots):
     """Precompute per-piece monomial conversion matrices for shape summary extraction.
 
     A cubic spline is piecewise cubic. That means, on each knot interval
@@ -276,8 +277,38 @@ def monomial_coefficents(basis_functions, knots):
         # S is (4, 4) and C_local[k] is (4, B), yielding a (4, B) matrix output
         C_global[k] = S @ C_local[k]
 
-    print(C_global)
     return C_global
+
+
+def build_knot_dictionary(nr_interior_knots, T):
+    """Return a dictionary with the key spline objects for a given knot configuration.
+
+    For a given number of interior knots (nr_interior_knots) and time
+    horizon (T) return a dictionary with the key knot objects:
+        - B-spline basis functions, 
+        - the augmented knot vector, 
+        - the monomial-conversion tensor C, 
+        - the breakpoints (interior plus boundary knots)
+        - the penalty matrix Omega
+        - the coefficient dimension B = nr_interior_knots + 4. 
+
+    Args:
+        nr_interior_knots: int, K; number of interior knots
+        T: float, time horizon.
+
+    Returns:
+        dict with keys "basis_functions", "knots" (full augmented vector), "C",
+            "breakpoints", "Omega", "n_basis".
+    """
+    augmented_knots = make_knots(nr_interior_knots, T)
+    basis_func = basis_functions(augmented_knots, degree=3)
+    C = monomial_coefficients(basis_func, augmented_knots)
+    breakpoints = np.unique(augmented_knots)
+    Omega = penalty_matrix(basis_func, augmented_knots)
+
+    return {"basis_functions": basis_func, "augmented_knots": augmented_knots, "C": C,
+            "breakpoints": breakpoints, "Omega": Omega,
+            "nr_basis": nr_interior_knots + 4}
 
 
 
@@ -285,4 +316,4 @@ if __name__ == "__main__":
     knots = make_knots(2, 5, degree=3)
     bsplines = basis_functions(knots, degree=3)
     penalty_matrix(bsplines, knots)
-    monomial_coefficents(bsplines, knots)
+    monomial_coefficients(bsplines, knots)
