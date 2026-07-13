@@ -395,6 +395,8 @@ def simulate_dataset(
         T: float, time horizon [0, T]. Default 1.0.
         regular: if True, evenly spaced observation times; if False,
             irregular times drawn per individual. Default True.
+        include_endpoints: Whether or not to include endpoints at [0, T] only
+            relevant when regular False
         seed: int or None, top-level seed for the run's rng.
 
     Returns:
@@ -474,9 +476,72 @@ def simulate_dataset(
     return dataset
 
 
-def true_shape_summaries(true_params, size, C, breakpoints, T):
-    pass
+def make_data_splits(generate_config, seed):
+    """Generate train, validation, and test SimulatedDatasets from one DGP.
 
-def estimate_true_sigma(covariates_ref, hyperparams, n_mc):
-    pass
+    Draws three independent splits from the identical data-generating process by
+    calling simulate_dataset three times with distinct sub-seeds derived from
+    `seed`, holding all other generative settings fixed. Reproducible: the same
+    base seed yields the same three splits.
 
+    Args:
+        generate_config: dict of simulate_dataset arguments except seed (D, N,
+            sigma, T, regular, include_endpoints, hyperparams, ranges).
+        seed: int; base seed from which the three split sub-seeds are derived.
+
+    Returns:
+        tuple: (train_dataset, val_dataset, test_dataset) containing three 
+            SimulatedDatasets from the same DGP with independent samples.
+    """
+    # Step 1: Unpack the configuration dictionary
+    D = generate_config["D"]
+    N = generate_config["N"]
+    hyperparams = generate_config["hyperparams"]
+    sigma = generate_config["sigma"]
+    ranges = generate_config["ranges"]
+    T = generate_config["T"]
+    regular = generate_config["regular"]
+    include_endpoints = generate_config["include_endpoints"]
+
+    # Step 2: Set up the reproducible random number generator and split seeds
+    base_rng = np.random.default_rng(seed)
+    train_seed, val_seed, test_seed = base_rng.integers(0, 2**32 - 1, size=3)
+
+    # Step 3: Simulate each split using the cleanly unpacked variables
+    train = simulate_dataset(
+        D=D,
+        N=N,
+        hyperparams=hyperparams,
+        sigma=sigma,
+        ranges=ranges,
+        T=T,
+        regular=regular,
+        include_endpoints=include_endpoints,
+        seed=int(train_seed),
+    )
+
+    val = simulate_dataset(
+        D=D,
+        N=N,
+        hyperparams=hyperparams,
+        sigma=sigma,
+        ranges=ranges,
+        T=T,
+        regular=regular,
+        include_endpoints=include_endpoints,
+        seed=int(val_seed),
+    )
+
+    test = simulate_dataset(
+        D=D,
+        N=N,
+        hyperparams=hyperparams,
+        sigma=sigma,
+        ranges=ranges,
+        T=T,
+        regular=regular,
+        include_endpoints=include_endpoints,
+        seed=int(test_seed),
+    )
+
+    return train, val, test
