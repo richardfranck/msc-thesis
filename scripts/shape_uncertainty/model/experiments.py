@@ -42,8 +42,8 @@ class RegularisationSweep:
     """
     def __init__(self, train_dataset, val_dataset, test_dataset, knot_objects,
                  model_cls, model_kwargs=None,
-                 upsilon_rel_1=0.02, upsilon_rel_2=0.02,
-                 evaluation_times=None,
+                 zeta_rel=0.0, upsilon_rel_1=0.02, upsilon_rel_2=0.02,
+                 upsilon_rel_prune=0.0, do_prune=False, evaluation_times=None,
                  lambda_re=0.0, nr_trials=25, nr_epochs=150, patience=10):
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
@@ -51,8 +51,11 @@ class RegularisationSweep:
         self.knot_objects = knot_objects
         self.model_cls = model_cls
         self.model_kwargs = model_kwargs or {}
+        self.zeta_rel = zeta_rel
         self.upsilon_rel_1 = upsilon_rel_1
         self.upsilon_rel_2 = upsilon_rel_2
+        self.upsilon_rel_prune = upsilon_rel_prune
+        self.do_prune = do_prune
         self.evaluation_times = (evaluation_times if evaluation_times is not None
                                   else np.linspace(0.0, test_dataset.T, 200))
         self.lambda_re = lambda_re
@@ -121,8 +124,11 @@ class RegularisationSweep:
             basis_functions=self.knot_objects["basis_functions"],
             C=self.knot_objects["C"], 
             breakpoints=self.knot_objects["breakpoints"],
+            zeta_rel=self.zeta_rel,
             upsilon_rel_1=self.upsilon_rel_1, 
             upsilon_rel_2=self.upsilon_rel_2,
+            upsilon_rel_prune=self.upsilon_rel_prune,
+            do_prune=self.do_prune,
         )
         evaluator = ModelEvaluator(engine, self.test_dataset)
 

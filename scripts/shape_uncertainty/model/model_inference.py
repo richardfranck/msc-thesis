@@ -27,14 +27,18 @@ class InferenceEngine:
                 "breakpoints": None,
                 }
         self.shape_config = {
+            "zeta_rel": 0.0,
             "upsilon_rel_1": None,
             "upsilon_rel_2": None,
+            "upsilon_rel_prune": 0.0,
+            "do_prune": False,
         }
 
         self.populated = False
 
     def populate_attributes(self, model, normaliser, basis_functions, 
-                            C , breakpoints, upsilon_rel_1, upsilon_rel_2):
+                            C , breakpoints, zeta_rel=0.0, upsilon_rel_1=0.0,
+                            upsilon_rel_2=0.0, upsilon_rel_prune=0.0, do_prune=False):
         """ Populate the attributes of the InferenceEngine. """
         # Populate the dataset
         if self.model is None:
@@ -52,8 +56,11 @@ class InferenceEngine:
 
         # Populate thw shape threshold configurations
         if self.shape_config["upsilon_rel_1"] is None:
+            self.shape_config["zeta_rel"] = zeta_rel
             self.shape_config["upsilon_rel_1"] = upsilon_rel_1
             self.shape_config["upsilon_rel_2"] = upsilon_rel_2
+            self.shape_config["upsilon_rel_prune"] = upsilon_rel_prune
+            self.shape_config["do_prune"] = do_prune
 
         # Track whether the attributes have been filled yet
         self.populated = True
@@ -100,8 +107,11 @@ class InferenceEngine:
                             w, 
                             self.knot_objects["C"], 
                             self.knot_objects["breakpoints"], 
-                            self.shape_config["upsilon_rel_1"],
-                            self.shape_config["upsilon_rel_2"]
+                            zeta_rel=self.shape_config["zeta_rel"],
+                            upsilon_rel_1=self.shape_config["upsilon_rel_1"],
+                            upsilon_rel_2=self.shape_config["upsilon_rel_2"],
+                            upsilon_rel_prune=self.shape_config["upsilon_rel_prune"],
+                            do_prune=self.shape_config["do_prune"],
         )
         return shape_summary
 

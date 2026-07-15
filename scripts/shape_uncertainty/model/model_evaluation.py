@@ -26,7 +26,8 @@ class ExtractionEvaluator:
     # --------------------- Shape Extraction Machinery ------------------- #
     # -------------------------------------------------------------------- #
 
-    def shape_summaries_at(self, nr_obs, nr_interior_knots, u1_rel, u2_rel):
+    def shape_summaries_at(self, nr_obs, nr_interior_knots,zeta_rel=0.0, 
+        u1_rel=0.0, u2_rel=0.0, upsilon_rel_prune=0.0, do_prune=False):
         """Extract shape summaries for the dataset at a GIVEN resolution.
 
         This function:
@@ -70,7 +71,14 @@ class ExtractionEvaluator:
             w, _, _, _ = np.linalg.lstsq(Phi, y_i, rcond=None)
 
             # Extract the shape summary
-            shape_summary = extract_shape_summary(w.reshape(-1, 1), C, breakpoints, u1_rel, u2_rel)
+            shape_summary = extract_shape_summary(
+                        w.reshape(-1, 1), C, breakpoints,
+                        zeta_rel=zeta_rel, 
+                        upsilon_rel_1=u1_rel, 
+                        upsilon_rel_2=u2_rel,
+                        upsilon_rel_prune=upsilon_rel_prune, 
+                        do_prune=do_prune,
+            )
             summaries.append(shape_summary)
 
         return summaries

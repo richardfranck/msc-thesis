@@ -377,7 +377,9 @@ class TimeViewInferenceEngine:
         which is needed for e.g. plotting of results. 
     """
 
-    def __init__(self, model, feature_names, C=None, breakpoints=None, upsilon_rel_1=None, upsilon_rel_2=None):
+    def __init__(self, model, feature_names, C=None, breakpoints=None, 
+        zeta_rel=0.0, upsilon_rel_1=None, upsilon_rel_2=None, 
+        upsilon_rel_prune=0.0, do_prune=False):
         """Wrap a trained LitTTS model for use with the shared plotting interface.
 
         Args:
@@ -396,8 +398,11 @@ class TimeViewInferenceEngine:
         self.feature_names = feature_names
         self.C = C
         self.breakpoints = breakpoints
+        self.zeta_rel = zeta_rel
         self.upsilon_rel_1 = upsilon_rel_1
         self.upsilon_rel_2 = upsilon_rel_2
+        self.upsilon_rel_prune = upsilon_rel_prune
+        self.do_prune = do_prune
 
     def _get_mean_coefficients(self, x):
         """Return the encoder's predicted B-spline coefficients h_theta(x) for one profile.
@@ -439,8 +444,11 @@ class TimeViewInferenceEngine:
             w,
             self.C,
             self.breakpoints,
-            self.upsilon_rel_1,
-            self.upsilon_rel_2,
+            zeta_rel=self.zeta_rel,
+            upsilon_rel_1=self.upsilon_rel_1,
+            upsilon_rel_2=self.upsilon_rel_2,
+            upsilon_rel_prune=self.upsilon_rel_prune,
+            do_prune=self.do_prune,
         )
         return shape_summary
 
