@@ -37,7 +37,7 @@ class InferenceEngine:
         self.populated = False
 
     def populate_attributes(self, model, normaliser, basis_functions, 
-                            C , breakpoints, zeta_rel=0.0, upsilon_rel_1=0.0,
+                            C=None , breakpoints=None, zeta_rel=0.0, upsilon_rel_1=0.0,
                             upsilon_rel_2=0.0, upsilon_rel_prune=0.0, do_prune=False):
         """ Populate the attributes of the InferenceEngine. """
         # Populate the dataset
