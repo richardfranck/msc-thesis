@@ -13,8 +13,33 @@ from vendor.timeview.timeview.lit_module import LitTTS
 
 from scripts.shape_uncertainty.shape_extraction.shape_summary import extract_shape_summary
 
+from scripts.shape_uncertainty.model.data_preparation import Normaliser
 
-def convert_sim_dataset_to_timeview_tuple(sim_dataset, feature_names):
+
+def fit_timeview_normaliser(train_data):
+    """Fit covariate + target normalisers on the training SimulatedDataset.
+
+    TimeView  standardises both the static covariates and the trajectory 
+    targets before training (see TTSBenchmark.prepare_data in
+    vendor/timeview/experiments/baselines.py).
+
+    The normaliser is fit on the training data only. The same statistics
+    transform the validation/test data and standardise covariates at inference
+    time (i.e. no information leakage).
+
+    Args:
+        train_data: SimulatedDataset used for training
+
+    Returns:
+        Normaliser: a normaliser fitted for both covariates (X) and targets (y).
+    """
+    normaliser = Normaliser()
+    normaliser.fit(train_data) # X per covariate
+    normaliser.fit_y(train_data) # y global
+    return normaliser
+
+
+def convert_sim_dataset_to_timeview_tuple(sim_dataset, normaliser):
     """Convert a SimulatedDataset into the (X, ts, ys) tuple TimeView's TTSDataset expects.
 
     Our SimulatedDataset class stores model-visible data as a covariate dictionary
@@ -32,8 +57,8 @@ def convert_sim_dataset_to_timeview_tuple(sim_dataset, feature_names):
         - X: dict mapping covariate names to arrays of shape (D,).
         - times: length-D list where times[i] has shape (N_i,).
         - Y_noisy: length-D list where Y_noisy[i] has shape (N_i,).
-        feature_names: Ordered names of the static covariates to include as
-            Timeview input features. The order defines the columns of X.
+        normaliser: fitted Normaliser where X is standardised via
+            transform and ys via transform_y.
 
     Returns:
         X: float32 array (D, M) of static covariates.
@@ -41,15 +66,13 @@ def convert_sim_dataset_to_timeview_tuple(sim_dataset, feature_names):
         ys: length-D list of float32 arrays (N_i,) of noisy observations.
     """
     # Step 1: Convert a sim_dataset dict of arrays into a 2D numpy array of shape (D, M). 
-    X = np.column_stack([
-        sim_dataset.X[name] for name in feature_names
-    ]).astype(np.float32)
+    X = normaliser.transform(sim_dataset.X).numpy().astype(np.float32)   # (D, M) standardised
 
-    # Step 2: Convert each individual's observation times to float32 arrays.
+    # Step 2: Convert each individual's noisy trajectory observations to float32 arrays.
+    ys = [normaliser.transform_y(y).astype(np.float32) for y in sim_dataset.Y_noisy]
+
+    # Step 3: Convert each individual's observation times to float32 arrays.
     ts = [np.asarray(t, dtype=np.float32) for t in sim_dataset.times]
-
-    # Step 3: Convert each individual's noisy trajectory observations to float32 arrays.
-    ys = [np.asarray(y, dtype=np.float32) for y in sim_dataset.Y_noisy]
 
     return (X, ts, ys)
 
@@ -83,7 +106,6 @@ def sample_timeview_hyperparams(trial, search_space):
     }
 
     return hyperparameter_selection
-
 
 
 def make_timeview_config(hyperparas, features, T, n_basis, seed=42, dataloader_type="iterative"):
@@ -127,8 +149,7 @@ def make_timeview_config(hyperparas, features, T, n_basis, seed=42, dataloader_t
     return timeview_config
 
 
-
-def fit_timeview_model(config, train_data, val_data, feature_names, epochs, patience):
+def fit_timeview_model(config, train_data, val_data, epochs, patience):
     """Train one LitTTS model on prepared train/val data under early stopping.
 
         1. Build TTSDataset objects and dataloaders for the given train/val
@@ -141,20 +162,24 @@ def fit_timeview_model(config, train_data, val_data, feature_names, epochs, pati
         config: the TimeView configuration for this run
         train_data: SimulatedDataset used for training.
         val_data: SimulatedDataset used for validation and early stopping.
-        feature_names: Ordered names of the static covariates to use as
-            TimeView input features.
         epochs: maximum int number of training epochs.
         patience: int number of epochs with no val_loss improvement before
             early stopping triggers.
 
     Returns:
-        pl.callbacks.ModelCheckpoint: the checkpoint callback used during
-        training, exposing best_model_score (float validation loss) and
-        best_model_path (path to the best-epoch weights on disk).
-    """
-    # Step 1: Create timeview TTSDatasets for training and validation
-    train_tts = TTSDataset(config, convert_sim_dataset_to_timeview_tuple(train_data, feature_names))
-    val_tts = TTSDataset(config, convert_sim_dataset_to_timeview_tuple(val_data, feature_names))
+        turple of pl.callbacks.ModelCheckpoint and a fitted normaliser
+           - pl.callbacks.ModelCheckpoint: the checkpoint callback used during
+            training, exposing best_model_score (float validation loss) and
+            best_model_path (path to the best-epoch weights on disk).
+          - normaliser fitted on the training dataset
+        
+    """ 
+    # Step 0: Fit normalisers on train_data
+    normaliser = fit_timeview_normaliser(train_data)
+
+    # Step 1: Create normalised timeview TTSDatasets for training and validation
+    train_tts = TTSDataset(config, convert_sim_dataset_to_timeview_tuple(train_data, normaliser))
+    val_tts = TTSDataset(config, convert_sim_dataset_to_timeview_tuple(val_data, normaliser))
 
     # Step 2: Build a timveview dataloader for training and validation batches
     train_loader = create_dataloader(config, train_tts, shuffle=True) # randomise order for better training
@@ -182,8 +207,8 @@ def fit_timeview_model(config, train_data, val_data, feature_names, epochs, pati
     # Step 5: Train the the timeview model on the training data and score on the validation data
     trainer.fit(model, train_loader, val_loader)
 
-    # Step 6: Return the pytorch_lightning checkpoint 
-    return checkpoint
+    # Step 6: Return the pytorch_lightning checkpoint and the fitted normaliser
+    return checkpoint, normaliser
 
 
 def run_timeview_optuna_trial(trial, train_data, val_data, nr_basis, search_space, epochs=200, patience=10):
@@ -211,7 +236,7 @@ def run_timeview_optuna_trial(trial, train_data, val_data, nr_basis, search_spac
     config = make_timeview_config(hyperparams, features, train_data.T, nr_basis, seed=42)
 
     # Step 3: Train a LitTTS model on train_data with early stopping on val_data.
-    checkpoint = fit_timeview_model(config, train_data, val_data, features, epochs, patience)
+    checkpoint, _ = fit_timeview_model(config, train_data, val_data, epochs, patience)
  
     # Step 4: Save best validation loss value for ranking the trial against others
     best_value = float(checkpoint.best_model_score)
@@ -280,7 +305,7 @@ def train_final_timeview_model(best_params, train_data, val_data, nr_basis, epoc
     config = make_timeview_config(best_params, features, train_data.T, nr_basis, seed=seed)
 
     # Step 2: Train a LitTTS model on train_data with early stopping on val_data
-    checkpoint = fit_timeview_model(config, train_data, val_data, features, epochs, patience)
+    checkpoint, normaliser = fit_timeview_model(config, train_data, val_data, epochs, patience)
 
     # Step 3: Load the best-checkpoint weights back into a LitTTS model.
     model = LitTTS.load_from_checkpoint(checkpoint.best_model_path, config=config)
@@ -294,6 +319,7 @@ def train_final_timeview_model(best_params, train_data, val_data, nr_basis, epoc
         "config": config,
         "best_params": best_params,
         "best_value": float(checkpoint.best_model_score),
+        "normaliser": normaliser,
     }
 
 
@@ -330,7 +356,16 @@ def save_timeview_run(tuned, generate_config, path="."):
             "dataloader_type": config.dataloader_type,
             "internal_knots": config.internal_knots, # Required by Config's constructor. Not used otherwise.
         },
+        "normaliser": {
+            "names": list(tuned["normaliser"].names),
+            "mean": tuned["normaliser"].mean.tolist(),
+            "std": tuned["normaliser"].std.tolist(),
+            "y_mean": tuned["normaliser"].y_mean,
+            "y_std": tuned["normaliser"].y_std,
+            "epsilon": tuned["normaliser"].epsilon,
+        },
     }
+
     # Step 3: Write the metadata dict to path/run.json.
     with open(os.path.join(path, "run.json"), "w") as f:
         json.dump(meta, f, indent=2)
@@ -360,7 +395,16 @@ def load_timeview_run(path="."):
     model.model.load_state_dict(torch.load(os.path.join(path, "model.pt"), weights_only=True))
     model.eval()
 
-    # Step 4: Return a dict with the loaded model, config, best parameter values, 
+    # Step 4: Rebuild the normaliser
+    ns = meta["normaliser"]
+    normaliser = Normaliser(epsilon=ns["epsilon"])
+    normaliser.names = tuple(ns["names"])
+    normaliser.mean = np.array(ns["mean"])
+    normaliser.std = np.array(ns["std"])
+    normaliser.y_mean = ns["y_mean"]
+    normaliser.y_std = ns["y_std"]
+
+    # Step 5: Return a dict with the loaded model, config, best parameter values, 
     # best validation loss and the data generation configuration
     return {
         "model": model,
@@ -368,6 +412,7 @@ def load_timeview_run(path="."):
         "best_params": meta["best_params"],
         "best_value": meta["best_value"],
         "generate_config": meta["generate_config"],
+        "normaliser": normaliser
     }
 
 
@@ -379,7 +424,7 @@ class TimeViewInferenceEngine:
 
     def __init__(self, model, feature_names, C=None, breakpoints=None, 
         zeta_rel=0.0, upsilon_rel_1=None, upsilon_rel_2=None, 
-        upsilon_rel_prune=0.0, do_prune=False):
+        upsilon_rel_prune=0.0, do_prune=False, normaliser=None,):
         """Wrap a trained LitTTS model for use with the shared plotting interface.
 
         Args:
@@ -403,6 +448,7 @@ class TimeViewInferenceEngine:
         self.upsilon_rel_2 = upsilon_rel_2
         self.upsilon_rel_prune = upsilon_rel_prune
         self.do_prune = do_prune
+        self.normaliser = normaliser
 
     def _get_mean_coefficients(self, x):
         """Return the encoder's predicted B-spline coefficients h_theta(x) for one profile.
@@ -418,8 +464,8 @@ class TimeViewInferenceEngine:
         Returns:
             coeff_vector: A torch.Tensor of shape (B,) of the mean coefficients.
         """
-        # Step 1: Get the feature values in the order of feature_names
-        feature_values = [x[name] for name in self.feature_names]
+        # Step 1: Normalise feature values
+        feature_values = self.normaliser.transform_one(x)
         feature_values = np.array(feature_values, dtype=np.float32) # shape (M,)
         feature_values = feature_values.reshape(1, -1) # shape (1, M)
 
@@ -466,8 +512,8 @@ class TimeViewInferenceEngine:
         Returns:
             torch.Tensor of shape (len(times),);.
         """
-        # Step 1: Get the feature values in the order of feature_names
-        feature_values = [x[name] for name in self.feature_names]
+        # Step 1: Normalise the covariates (as at training time)
+        feature_values = self.normaliser.transform_one(x)
         feature_values = np.array(feature_values, dtype=np.float32) # shape (M,)
 
         # Step 2: Get the observation times as an np.array 
@@ -475,6 +521,9 @@ class TimeViewInferenceEngine:
 
         # Step 3: Get the forecast values using the timeview forecast_trajectory() function
         y_pred = self.model.forecast_trajectory(feature_values, times)
+
+        # Step 4: Inverse-transform predictions back to real units
+        y_pred = self.normaliser.inverse_transform_y(y_pred)  # (N,) np
         y_pred = torch.from_numpy(y_pred)
 
         return y_pred

@@ -5,6 +5,7 @@ from scripts.shape_uncertainty.spline_basis.bspline_basis import basis_matrix
 
 class Normaliser:
     """Standardise a dataset's covariate dict into a fixed-order (D, M) tensor.
+        and normalise the outcomes. 
 
     Attributes:
         eps: float, lower floor on each std to avoid division by zero for
@@ -13,17 +14,26 @@ class Normaliser:
         mean: np.ndarray of shape (M,); per-covariate training means (None until fit).
         std: np.ndarray of shape (M,); per-covariate training stds, floored at eps
             (None until fit).
+        y_mean: float; mean of the outcome variable across all individuals and observations (None until fit_y).
+        y_std: float; std of the outcome variable across all individuals and observations (None until fit_y).
     """
     def __init__(self, epsilon=1e-8):
         self.epsilon = epsilon
         self.names = None
         self.mean = None
         self.std = None
+        self.y_mean = None
+        self.y_std = None
 
     @property
     def is_fitted(self):
         """True once fit() has recorded the column order and statistics."""
         return self.names is not None
+
+    @property
+    def is_y_fitted(self):
+        """True once fit_y() has recorded the outcome standardisation statistics."""
+        return self.y_mean is not None
 
     def fit(self, dataset):
         """Learn feature order, feature means, and feature std devs from the TRAINING dataset.
@@ -114,6 +124,58 @@ class Normaliser:
 
         return torch.as_tensor(z, dtype=torch.float64)
 
+    def fit_y(self, dataset):
+        """Learn target global mean and std from the TRAINING dataset's observations.
+
+        Args:
+            dataset: a dataset with a length-D list Y_noisy where
+                Y_noisy[i] is the (N_i,) array of individual i's observations.
+
+        Returns:
+            self (fitted), so calls can be chained.
+        """
+        # Step 1: Combine all individual 1D arrays ((N_i,)) into one single 1D array
+        all_y = np.concatenate(dataset.Y_noisy).astype(float)
+
+        # Step 2: Compute the mean across all y in the dataset
+        self.y_mean = float(all_y.mean())
+
+        # Step 3: Compute the std across all y in the dataset (floor at self.epsilon)
+        self.y_std = float(max(all_y.std(), self.epsilon))
+
+        return self
+
+    def transform_y(self, y):
+        """Standardise a given outcome target array with the fitted stats.
+
+        Apply z = (y - y_mean) / y_std using the statistics recorded by fit_y.
+
+        Args:
+            y: np.ndarray of target values.
+
+        Returns:
+            np.ndarray of the same shape; the standardised targets.
+        """
+        if not self.is_y_fitted:
+            raise RuntimeError("Call fit_y before transform_y.")
+
+        return (y - self.y_mean) / self.y_std
+
+    def inverse_transform_y(self, y_norm):
+        """Map standardised outcomes or predictions to original units.
+
+        Args:
+            y_norm: np.ndarray of standardised targets or predictions.
+
+        Returns:
+            np.ndarray of the same shape, expressed in the original target units.
+        """
+        if not self.is_y_fitted:
+            raise RuntimeError("Call fit_y before inverse_transform_y.")
+
+        return y_norm * self.y_std + self.y_mean
+
+
 class Batch:
     """Model-ready training data for one set of individuals.
 
@@ -191,6 +253,10 @@ def prepare_training_data(dataset, basis, normaliser):
     else:
         X = normaliser.transform(dataset.X) # Transform
 
+    # Step 1b: Fit the normaliser on the first call, i.e. during training 
+    if not normaliser.is_y_fitted:
+        normaliser.fit_y(dataset)
+
     # Step 2: Get a list with each individuals's normalised covariate row
     x_list = [X[i] for i in range(X.shape[0])]
 
@@ -206,7 +272,7 @@ def prepare_training_data(dataset, basis, normaliser):
         Phi_list.append(Phi_i)
 
         # Get each individual's outcomes y_i
-        y_i = dataset.Y_noisy[i] # (N_i,) np.ndarray
+        y_i = normaliser.transform_y(dataset.Y_noisy[i]) # (N_i,) np.ndarray
         y_i = torch.as_tensor(y_i, dtype=torch.float64) # (N_i,) tensor
         y_list.append(y_i)
 

@@ -132,7 +132,10 @@ class InferenceEngine:
         w = self._get_mean_coefficients(x)                        # (B,)
         Phi = torch.as_tensor(basis_matrix(np.asarray(times, float),
                                            self.knot_objects["basis_functions"]))
-        return Phi @ w
+        y_norm = Phi @ w
+        y_norm  = y_norm.detach().cpu().numpy()
+        y = self.normaliser.inverse_transform_y(y_norm)
+        return torch.as_tensor(y)
 
     # -------------- single-model aleatoric (deferred; needs Sigma_hat) --------------
 
