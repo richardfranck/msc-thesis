@@ -208,6 +208,24 @@ class RandomEffectsModel(nn.Module, ABC):
         """
         raise NotImplementedError
 
+    @abstractmethod
+    def batch_log_likelihood(self, batch):
+        """Compute the per-individual marginal log-likelihood for an entire batch.
+
+        This method is the vectorised counterpart of marginal_log_likelihood. 
+        Note that this requires all individuals to share the same observation 
+        count N (observation times may still differ). If this is not the case, 
+        the training pipeline uses theper-individual marginal_log_likelihood.
+
+        Args:
+            batch: a Batch of prepared training data.
+
+        Returns:
+            torch.Tensor of shape (D,); the per-individual marginal
+                log-likelihoods.
+        """
+        raise NotImplementedError
+
 
 class GaussianModel(RandomEffectsModel):
     """Random-effects model with Gaussian random effect.
@@ -341,6 +359,7 @@ class GaussianModel(RandomEffectsModel):
         """
         return torch.trace(Omega @ self.sigma_matrix())
 
+
     def penalty(self, Omega, X, lambda_mean, lambda_re):
         """Total weighted wiggle penalty with separate component knobs.
 
@@ -359,6 +378,56 @@ class GaussianModel(RandomEffectsModel):
         return (lambda_mean * self.mean_wiggle(X, Omega)
                 + lambda_re * self.re_wiggle(Omega))
 
+    def batch_log_likelihood(self, batch):
+        """Per-individual marginal log-likelihood (D,) for equal-N batches.
+
+        The marginal_log_likelihood method above handles one individual
+        at one time only. This permits it to handle batches where the
+        observation counts differ across individuals but makes it slow.
+        This function implements the same likelihood for an entire batch
+        at once. However, it requires all individuals to share the same
+        observation count N (observation times may differ, so each
+        individual keeps its own marginal covariance V_d).
+
+        Notice that unlike the MeanOnlyModel likelihood is NOT averaged here
+        but is the joint multivariate-normal log-density per individual.
+
+        Args:
+            batch: the prepared training data (normalised X, per-individual x_i,
+                precomputed Phi_i, and observed y_i).
+
+        Returns:
+            torch.Tensor: A 1D tensor of shape (D,) containing the marginal
+                (joint) log-likelihood log p(y_d | x_d) for each individual.
+        """
+        # Step 1: Ensure the observation count N is identical across all individuals.
+        Ns = {y.shape[0] for y in batch.y_list}
+        if len(Ns) != 1:
+            raise ValueError("batch_log_likelihood requires equal observation counts per individual.")
+
+        # Step 2: Generate spline coefficient matrix and stack the design matrices.
+        H = self.encoder(batch.X).unsqueeze(-1)  # (D, B) -> (D, B, 1)
+        Phi = torch.stack(batch.Phi_list, dim=0)  # (D, N, B)
+
+        # Step 3: Compute the mean trajectory (MU) using batch matrix multiplication.
+        MU = torch.bmm(Phi, H).squeeze(-1)  # (D, N, 1) -> (D, N)
+
+        # Step 4: Build each individual's marginal covariance V_d = Phi_d Sigma Phi_d^T + sigma^2 I.
+        Sigma = self.sigma_matrix()  # (B, B)
+        N = Phi.shape[1]
+        identity_N = torch.eye(N, dtype=Phi.dtype, device=Phi.device)  # (N, N)
+        PhiSigma = Phi @ Sigma  # (D, N, B)
+        V = torch.bmm(PhiSigma, Phi.transpose(1, 2)) + self.get_noise_variance() * identity_N  # (D, N, N)
+
+        # Step 5: Create a batched multivariate normal parameterised by the means (MU)
+        # and the per-individual marginal covariances (V).
+        dist = torch.distributions.MultivariateNormal(MU, covariance_matrix=V)
+
+        # Step 6: Stack the ground-truth outcomes into a single batch tensor.
+        Y = torch.stack(batch.y_list, dim=0)  # (D, N)
+
+        # Step 7: Compute the joint log-probability of the outcomes (Y) per individual.
+        return dist.log_prob(Y)  # (D,)
 
 class MeanOnlyModel(RandomEffectsModel):
     """A penalised-MSE model baseline.
@@ -390,7 +459,8 @@ class MeanOnlyModel(RandomEffectsModel):
         This function implements the MSE loss objective for one individual 
         as used in the Timeview model. That is, the loss is AVERAGED over the N_i 
         observations (not summed). Additionally it is averaged over the D samples
-        in negative_log_likelihood in optimisation_objective.py. 
+        in negative_log_likelihood in optimisation_objective.py. This is done
+        to match the TimeView MSE optimisation objective. 
 
         Args:
             y_i: torch.Tensor of shape (N_i,); the individual's observed
@@ -435,6 +505,46 @@ class MeanOnlyModel(RandomEffectsModel):
         """
         return lambda_mean * self.mean_wiggle(X, Omega)
 
+    def batch_log_likelihood(self, batch):
+        """Per-individual log-likelihood (D,) for equal-N batches.
+
+        The marginal_log_likelihood method above handles one individual 
+        at one time only. This permits it to handle batches where the
+        observation counts differ across individuals but makes is slow. 
+        This function implements the same likelihood for an entire batch
+        at once. However, it requires all individuals to share the same 
+        observation count N (observation times may differ). 
+
+        Args:
+            Batch: the prepared training data (normalised X, per-individual x_i,
+            precomputed Phi_i, and observed y_i).
+
+        Returns:
+            Returns:
+            torch.Tensor: A 1D tensor of shape (D,) containing the average 
+                          log-likelihood for each individual in the batch.
+        """
+        # Step 1: Ensure the observation count N is identical across all individuals.
+        Ns = {y.shape[0] for y in batch.y_list}
+        if len(Ns) != 1:
+            raise ValueError("batch_log_likelihood requires equal observation counts per individual.")
+
+        # Step 2: Generate spline coefficent matix and stack feature matrices.
+        H = self.encoder(batch.X).unsqueeze(-1) # (D, B) -> (D, B, 1)
+        Phi = torch.stack(batch.Phi_list, dim=0) # (D, N, B)
+   
+        # Step 3: Compute the mean trajectory (MU) using batch matrix multiplication.
+        MU  = torch.bmm(Phi, H).squeeze(-1) # (D, N, 1) -> (D, N)
+
+        # Step 4: Create a normal distribution parameterised by the predicted means (MU)
+        # and a globally shared noise standard deviation.
+        dist = torch.distributions.Normal(MU, self.get_noise_std())
+
+        # Step 5: Stack the ground-truth outcomes into a single batch tensor.
+        Y = torch.stack(batch.y_list,  dim=0) # (D, N)
+
+        # Step 6: Compute the log-probability of the outcomes (Y), averaged across N observations.
+        return dist.log_prob(Y).mean(dim=1) # (D,)
 
 class MixtureModel:
     pass

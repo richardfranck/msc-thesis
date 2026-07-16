@@ -9,6 +9,11 @@ def negative_log_likelihood(model, batch):
     loss function the the likelihood/penalty balance is invariant to the
     number of individuals D and to the mini-batch size.
     
+    When every individual in the batch has the same observation count N, 
+    we use the vectorised model.batch_log_likelihood. When the counts
+    differ, the per-individual model.marginal_log_likelihood loop is used
+    instead.
+
     Args:
         model: a RandomEffectsModel (e.g. GaussianModel); supplies
             marginal_log_likelihood(y_i, Phi_i, x_i).
@@ -17,6 +22,11 @@ def negative_log_likelihood(model, batch):
     Returns:
         scalar torch.Tensor; the total negative marginal log-likelihood.
     """
+    # Case 1: If all individuals in the batch have the same observation count
+    if len({y.shape[0] for y in batch.y_list}) == 1:
+        return -model.batch_log_likelihood(batch).sum() / batch.D
+
+    # Case 2: If individuals in the batch do not have the same observation count
     total = 0.0
     for i in range(batch.D):
         # Subtract each individual's marginal log-likelihood (sum of NLLs over the batch)
