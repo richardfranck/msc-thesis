@@ -83,14 +83,16 @@ class ExtractionEvaluator:
 
         return summaries
 
-    def get_true_shape_summary(self, upsilon_rel_1, upsilon_rel_2):
+    def get_true_shape_summary(self, upsilon_rel_1, upsilon_rel_2, upsilon_rel_prune, do_prune):
         """Return analytic ground-truth shape summaries using the DGP.
 
         Returns:
             A D-length list of shape summaires
         """
-        return get_analytic_shape_summary(self.dataset, upsilon_rel_1, upsilon_rel_2)
-
+        return get_analytic_shape_summary(
+            self.dataset, upsilon_rel_1, upsilon_rel_2,
+            upsilon_rel_prune, do_prune,
+        )
 
     # -------------------------------------------------------------------- #
     # --------------------- Extraction Scoring Machinery ----------------- #
@@ -124,7 +126,7 @@ class ExtractionEvaluator:
         return matches / D
 
 
-    def extraction_accuracy(self, nr_obs, nr_interior_knots, u1_rel, u2_rel):
+    def extraction_accuracy(self, nr_obs, nr_interior_knots, zeta_rel, u1_rel, u2_rel, upsilon_rel_prune, do_prune):
         """Exact-sequence-match accuracy for one extraction configuration.
 
         Extracts shapes at the given (nr_obs, nr_interior_knots, u1_rel, u2_rel) and
@@ -141,15 +143,22 @@ class ExtractionEvaluator:
         Returns:
             float in [0, 1]; the exact-sequence-match share.
         """
-        predicted = self.shape_summaries_at(nr_obs, nr_interior_knots, u1_rel, u2_rel)
-        truth = self.get_true_shape_summary(u1_rel, u2_rel)
+        predicted = self.shape_summaries_at(
+            nr_obs, nr_interior_knots,
+            zeta_rel=zeta_rel, u1_rel=u1_rel, u2_rel=u2_rel,
+            upsilon_rel_prune=upsilon_rel_prune, do_prune=do_prune,
+        )
+        truth = self.get_true_shape_summary(
+            u1_rel, u2_rel,
+            upsilon_rel_prune=upsilon_rel_prune, do_prune=do_prune,
+        )
         return self.exact_sequence_match(predicted, truth)
 
     # -------------------------------------------------------------------- #
     # --------------------- Shape Extraction Analysis -------------------- #
     # -------------------------------------------------------------------- #
 
-    def sweep_observations(self, variable_nr_obs, fixed_nr_knots, fixed_u1_rel, fixed_u2_rel):
+    def sweep_observations(self, variable_nr_obs, fixed_nr_knots, zeta_rel, fixed_u1_rel, fixed_u2_rel, upsilon_rel_prune, do_prune):
         """Evaluate shape-extraction accuracy across varying observation densities.
 
         Evaluate how extraction accuracy varies as we vary the number of observations
@@ -168,12 +177,14 @@ class ExtractionEvaluator:
             list of (nr_obs, accuracy) pairs.
         """
         return [
-            (n, self.extraction_accuracy(n, fixed_nr_knots, fixed_u1_rel, fixed_u2_rel))
+            (n, self.extraction_accuracy(n, fixed_nr_knots, zeta_rel=zeta_rel,
+                                     u1_rel=fixed_u1_rel, u2_rel=fixed_u2_rel,
+                                     upsilon_rel_prune=upsilon_rel_prune, do_prune=do_prune))
             for n in variable_nr_obs
         ]
 
 
-    def sweep_knots(self, fixed_nr_obs, variable_nr_knots, fixed_u1_rel, fixed_u2_rel):
+    def sweep_knots(self, fixed_nr_obs, variable_nr_knots, zeta_rel, fixed_u1_rel, fixed_u2_rel, upsilon_rel_prune, do_prune):
         """Evaluate shape-extraction accuracy across varying spline complexities.
 
         Args:
@@ -186,7 +197,9 @@ class ExtractionEvaluator:
             list of (nr_interior_knots, accuracy) pairs.
         """
         return [
-            (k, self.extraction_accuracy(fixed_nr_obs, k, fixed_u1_rel, fixed_u2_rel))
+            (k, self.extraction_accuracy(fixed_nr_obs, k, zeta_rel=zeta_rel,
+                             u1_rel=fixed_u1_rel, u2_rel=fixed_u2_rel,
+                             upsilon_rel_prune=upsilon_rel_prune, do_prune=do_prune))
             for k in variable_nr_knots
         ]
 
@@ -194,7 +207,7 @@ class ExtractionEvaluator:
     # --------------------- Mismatch Exploration ------------------------- #
     # -------------------------------------------------------------------- #
 
-    def find_mismatches(self, nr_obs, nr_interior_knots, u1_rel, u2_rel):
+    def find_mismatches(self, nr_obs, nr_interior_knots, zeta_rel, u1_rel, u2_rel, upsilon_rel_prune, do_prune):
         """Collect the individuals whose predicted shape sequence misses the truth.
 
         Run extraction at the given configuration and return a record for every
@@ -213,8 +226,15 @@ class ExtractionEvaluator:
                 "predicted": the extracted shape summary,
                 "config": {"nr_obs", "nr_interior_knots", "u1_rel", "u2_rel"}.
         """
-        predicted = self.shape_summaries_at(nr_obs, nr_interior_knots, u1_rel, u2_rel)
-        truth = self.get_true_shape_summary(u1_rel, u2_rel)
+        predicted = self.shape_summaries_at(
+            nr_obs, nr_interior_knots,
+            zeta_rel=zeta_rel, u1_rel=u1_rel, u2_rel=u2_rel,
+            upsilon_rel_prune=upsilon_rel_prune, do_prune=do_prune,
+        )
+        truth = self.get_true_shape_summary(
+            u1_rel, u2_rel,
+            upsilon_rel_prune=upsilon_rel_prune, do_prune=do_prune,
+        )
 
         config = {"nr_obs": nr_obs, "nr_interior_knots": nr_interior_knots,
                   "u1_rel": u1_rel, "u2_rel": u2_rel}
@@ -227,13 +247,14 @@ class ExtractionEvaluator:
                                    "config": config})
         return mismatches
 
-    def iterate_mismatches(self, nr_obs, nr_interior_knots, u1_rel, u2_rel):
+    def iterate_mismatches(self, nr_obs, nr_interior_knots, zeta_rel, 
+        u1_rel, u2_rel, upsilon_rel_prune, do_prune):
         """Yield mismatch records one at a time (for clicking through in a notebook).
 
         Yields:
             mismatch record dicts (see find_mismatches).
         """
-        yield from self.find_mismatches(nr_obs, nr_interior_knots, u1_rel, u2_rel)
+        yield from self.find_mismatches(nr_obs, nr_interior_knots, zeta_rel, u1_rel, u2_rel, upsilon_rel_prune, do_prune)
 
 
 

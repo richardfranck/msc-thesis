@@ -65,7 +65,9 @@ class RegularisationSweep:
 
         # Ground truth shapes (independent of lambda_mean and model_cls)
         self.true_summaries = get_analytic_shape_summary(
-            test_dataset, upsilon_rel_1, upsilon_rel_2)
+            test_dataset, upsilon_rel_1, upsilon_rel_2,
+            upsilon_rel_prune, do_prune,
+        )
 
     def _run_one(self, lambda_mean):
         """Tune and train model_cls at one lambda_mean value.
@@ -179,8 +181,13 @@ class RegularisationSweep:
     
             engines_by_lambda (dict): A dictionary with lambda_mean values as keys and
                 values as the trained InferenceEngine instances.
+
+            tuned_by_lambda (dict): A dictionary with lambda_mean values as keys and
+                values as the full tuned dict returned by Tuner.run (model, normaliser,
+                best_params, best_value, study), retained so each trained model can be
+                persisted with save_run.
         """
-        rows, engines_by_lambda = [], {}
+        rows, engines_by_lambda, tuned_by_lambda = [], {}, {}
         for lambda_mean in lambda_mean_grid:
             # Step 1: Tune a model
             tuned = self._run_one(lambda_mean)
@@ -192,6 +199,7 @@ class RegularisationSweep:
             # Step 3: Save results
             rows.append(evaluation_metrics)
             engines_by_lambda[lambda_mean] = engine
+            tuned_by_lambda[lambda_mean] = tuned
 
         # Step 4: Built the results into a  DataFrame
         df = pd.DataFrame(rows)
@@ -200,4 +208,4 @@ class RegularisationSweep:
         "mean_wiggle"
         ]]
         
-        return results_df, engines_by_lambda
+        return results_df, engines_by_lambda, tuned_by_lambda
