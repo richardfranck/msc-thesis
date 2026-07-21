@@ -57,18 +57,13 @@ class ExtractionEvaluator:
         breakpoints = np.unique(augmented_knots)
         Phi = basis_matrix(observation_times, basis_func)
 
+        # Evaluate every individual's noise-free curve on the shared grid
+        Y_true = self.dataset.true_curves_at(observation_times)
+
         summaries = []
         for i in range(self.dataset.D):
-            # Create noise-free Wilkerson outcomes at observation times from self.dataset
-            y_i = compute_wilkerson(
-                observation_times,
-                self.dataset.X["size"][i],
-                self.dataset.params["g"][i],
-                self.dataset.params["d"][i],
-                self.dataset.params["rho"][i]
-            )
             # Compute the OLS coefficients
-            w, _, _, _ = np.linalg.lstsq(Phi, y_i, rcond=None)
+            w, _, _, _ = np.linalg.lstsq(Phi, Y_true[i], rcond=None)
 
             # Extract the shape summary
             shape_summary = extract_shape_summary(
@@ -329,16 +324,7 @@ class ModelEvaluator:
             np.ndarray of shape (D, T) where row i is individual i's noise-free
                 trajectory at evaluation_times.
         """
-        return np.array([
-            compute_wilkerson(
-                evaluation_times,
-                self.dataset.X["size"][i], 
-                self.dataset.params["g"][i],
-                self.dataset.params["d"][i], 
-            self.dataset.params["rho"][i],
-            )
-            for i in range(self.dataset.D)
-        ])
+        return np.array(self.dataset.true_curves_at(evaluation_times))
 
     def _compute_RMSE(self, predicted, true):
         """Compute the root mean squared error (RMSE) 

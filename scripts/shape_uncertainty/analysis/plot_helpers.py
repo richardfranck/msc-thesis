@@ -1,8 +1,6 @@
 import matplotlib.pyplot as plt
 import numpy as np
 
-from scripts.shape_uncertainty.simulated_data.data_generator import compute_wilkerson
-
 # Plot layout and resolution configurations
 N_DENSE = 200
 N_COLS = 3
@@ -19,13 +17,7 @@ def _add_true_curve(axis, dataset, i, times):
     Returns:
         None
     """
-    y_true = compute_wilkerson(
-        times,
-        dataset.X["size"][i],
-        dataset.params["g"][i],
-        dataset.params["d"][i],
-        dataset.params["rho"][i],
-    )
+    y_true = dataset.true_curves_at(times, indices=[i])[0]
     axis.plot(times, y_true, lw=2, color="royalblue", label="True Curve")
 
 
