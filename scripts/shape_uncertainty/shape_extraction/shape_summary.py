@@ -5,6 +5,17 @@ CLASS_ROOT = 0
 CLASS_KNOT = 1
 CLASS_END  = 2
 
+# Possible shape state derivative sign tuples and the associated lablels
+SHAPE_STATES = { 
+        (+1, +1): "convex_increasing",
+        (-1, +1): "convex_decreasing",
+        (+1, -1): "concave_increasing",
+        (-1, -1): "concave_decreasing",
+        (+1,  0): "linear_increasing",
+        (-1,  0): "linear_decreasing", 
+        ( 0,  0): "constant"
+    }
+    
 def piece_coefficients(w, C):
     """Return monomial coefficents for each knot-interval.
     
@@ -837,21 +848,11 @@ def classify_signs(sign_d1, sign_d2):
     Returns:
         shape_state: An element of seven possiple shape states.
     """
-    shape_states = { 
-        (+1, +1): "convex_increasing",
-        (-1, +1): "convex_decreasing",
-        (+1, -1): "concave_increasing",
-        (-1, -1): "concave_decreasing",
-        (+1,  0): "linear_increasing",
-        (-1,  0): "linear_decreasing", 
-        ( 0,  0): "constant"
-    }
-    
     valid = {-1, 0, 1}
     if sign_d1 not in valid or sign_d2 not in valid:
         raise ValueError(f"Signs must be in {{-1, 0, 1}}; got ({sign_d1}, {sign_d2}).")
 
-    state = shape_states.get((sign_d1, sign_d2))
+    state = SHAPE_STATES.get((sign_d1, sign_d2))
     if state is None:
         raise ValueError(
             f"Sign pair ({sign_d1}, {sign_d2}) has zero slope with non-zero "
