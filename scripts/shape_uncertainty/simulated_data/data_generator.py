@@ -493,7 +493,7 @@ class SimulatedDataset:
 
         return Split(test=test, val=val, train=train)
 
-    def true_curves_at(self, times, indices):
+    def true_curves_at(self, times, indices=None):
         """Evaluate noise-free trajectories at arbitrary times.
 
         Unlike the stored Y_true, which holds each individual's trajectory
@@ -514,8 +514,11 @@ class SimulatedDataset:
                 individual, in the order given by `indices`, each of shape
                 (len(times),).
         """
-        # Step 2: Restrict to the specified individuals
-        selected = self._select_individuals(indices)
+        # Step 1: Restrict to the specified individuals, or use all of them
+        if indices is None:
+            selected = self
+        else:
+            selected = self._select_individuals(indices)
 
         # Step 2: Give every selected individual the same evaluation grid
         times_per_individual = [times] * selected.D
@@ -524,6 +527,32 @@ class SimulatedDataset:
         return self.dgp.true_curves(
             times_per_individual, selected.X, selected.params
         )
+
+    def individual_covariates(self):
+        """Return covariates as a D-length list of per-individual feature dicts.
+
+        Converts the column-oriented X (covariate name to array over individuals)
+        into a row-oriented list, one dict per individual, as required by the inference
+        engine.
+
+        self.dataset.X stores individual covariates as:
+            {
+                "size":  [person1, person2, person3, ...],
+                "age":   [person1, person2, person3, ...],
+                            ...
+            }
+        We modify this into a list of feature values for individuals:  
+            [
+            {"size": float, "age": float, "weight": float, "dosage": float}, # Person 1
+            {"size": float, "age": float, "weight": float, "dosage": float}, # Person 2
+                            ...
+            ]
+
+        Returns:
+            list of length D; element i is {covariate_name: value} for individual i.
+        """
+        names = list(self.X.keys())
+        return [{name: self.X[name][i] for name in names} for i in range(self.D)]
 
 
 def _make_regular_observation_times(N, T):
@@ -669,15 +698,15 @@ def generate_simulated_dataset(dgp, D, N=20, sigma=0.0, regular=True,
     X, Z, params = dgp.draw_population(D, rng)
 
     # Step 2: Build per-individual observation times on [0, T]
-    ttimes = make_observation_times(D, N, dgp.T, regular, include_endpoints, rng)
+    times = make_observation_times(D, N, dgp.T, regular, include_endpoints, rng)
 
     # Step 3: Evaluate the noise-free Wilkerson trajectory at those times
     Y_true = dgp.true_curves(times, X, params)
 
-    # Step 6: Add i.i.d. N(0, sigma^2) measurement noise
+    # Step 4: Add i.i.d. N(0, sigma^2) measurement noise
     Y_noisy = add_noise(Y_true, sigma, rng)
 
-    # Step 7: Generate the SimulatedDataset instance and return it
+    # Step 5: Generate the SimulatedDataset instance and return it
     design = {
         "D": D, "N": N, "sigma": sigma, "regular": regular, 
         "include_endpoints": include_endpoints, "seed": seed,
@@ -685,7 +714,7 @@ def generate_simulated_dataset(dgp, D, N=20, sigma=0.0, regular=True,
 
     dataset =  SimulatedDataset(
         X=X, times=times, Y_noisy=Y_noisy,
-        Z=Z, params=parameters, Y_true=Y_true, true_shapes = None, true_sigma = None,
+        Z=Z, params=params, Y_true=Y_true, true_shapes = None, true_sigma = None,
         dgp=dgp, design=design, 
     )
 

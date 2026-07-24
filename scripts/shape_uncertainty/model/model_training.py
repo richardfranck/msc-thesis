@@ -449,3 +449,35 @@ class Tuner:
 
         return {"best_params": hyperparas, "best_value": study.best_value,
                 "model": model, "normaliser": normaliser, "study": study}
+
+
+    def train_fixed_configuration(self, hyperparas):
+        """Train a model for a GIVEN hyperparameter configuration (no Optuna search).
+
+        Train a model with the given hyperparam config on the training data 
+        with validation-based early stopping.
+
+        Args:
+            hyperparas: dict shaped like run()'s "best_params" (hidden_sizes,
+                activation, dropout, lr, batch_size, weight_decay).
+
+        Returns:
+            dict with keys:
+                "best_params": the best structured hyperparameter dict,
+                "best_value": the best validation objective achieved,
+                "model": the retrained best RandomEffectsModel,
+                "normaliser": the fitted covariate normaliser,
+                "study": the completed optuna.Study.
+        """
+        # Step 1: Prepare train/validation batches  
+        train_batch, val_batch, normaliser = self._prepare_batches()
+
+        # Step 2: Train at the given hyperparameters, no search
+        model = self._train_re_model(hyperparas, train_batch, val_batch)
+
+        # Step 3: Score on validation for logging/provenance
+        best_value = evaluate_objective(model, val_batch, self.Omega,
+                                        self.lambda_mean, self.lambda_re)
+
+        return {"best_params": hyperparas, "best_value": best_value,
+                "model": model, "normaliser": normaliser}

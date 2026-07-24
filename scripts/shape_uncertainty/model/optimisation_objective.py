@@ -16,11 +16,11 @@ def negative_log_likelihood(model, batch):
 
     Args:
         model: a RandomEffectsModel (e.g. GaussianModel); supplies
-            marginal_log_likelihood(y_i, Phi_i, x_i).
+            marginal_log_likelihood(y_i, Phi_i, x_i) or batch_log_likelihood
         batch: a Batch of prepared training data.
 
     Returns:
-        scalar torch.Tensor; the total negative marginal log-likelihood.
+        scalar torch.Tensor; the average negative marginal log-likelihood.
     """
     # Case 1: If all individuals in the batch have the same observation count
     if len({y.shape[0] for y in batch.y_list}) == 1:

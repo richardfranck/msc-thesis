@@ -254,10 +254,10 @@ def _compute_curvature_flat_band(size, g, d, rho, T, upsilon_2):
         band_start = brentq(lambda t: _evaluate_wilkerson_double_prime(t, size, g, d, rho) - upsilon_2, 0.0, t_min)
 
     # Step 4: Given that a curvature flat region exists, find its right boundary "b"
-    if _y_double_prime(T, size, g, d, rho) < upsilon_2:
+    if _evaluate_wilkerson_double_prime(T, size, g, d, rho) < upsilon_2:
         band_end = T
     else:
-        band_end = brentq(lambda t: _y_double_prime(t, size, g, d, rho) - upsilon_2, t_min, T)
+        band_end = brentq(lambda t: _evaluate_wilkerson_double_prime(t, size, g, d, rho) - upsilon_2, t_min, T)
 
     # Step 5: Return the endpoints of the curvature flat bands as floats
     return (float(band_start), float(band_end))
