@@ -52,15 +52,15 @@ def mean_shape_sequence_match(predicted, true):
     return matches / D
 
 
-def _merge_transition_points(summary_a, summary_b, T):
-    """Assemble the ordered set of transition points of both two summaries.
+def _merge_transition_points(summaries, T):
+    """Assemble the ordered set of transition points across a set of summaries.
 
-    This function builds G defined as the union of the transition points of both 
+    This function builds G defined as the union of the transition points of 
     shape summaries and the domain boundaries 0 and T. 
 
     Args:
-        summary_a: list of (state, start_time) tuples over [0, T].
-        summary_b: list of (state, start_time) tuples over [0, T].
+        summaries: sequence of M shape summaries, each a list of
+            (state, start_time) tuples over [0, T].
         T: float, the right endpoint of the forecasting horizon.
 
     Returns:
@@ -68,12 +68,11 @@ def _merge_transition_points(summary_a, summary_b, T):
             and last entry T.
     """
     # Get the transition points and domain boundaries 
-    start_times_a = [time for _, time in summary_a] 
-    start_times_b = [time for _, time in summary_b]
+    start_times = [time for summary in summaries for _, time in summary]
     domain_boundaries = [0.0, T]
 
     # Obtain a sorted array
-    combined = start_times_a + start_times_b + domain_boundaries
+    combined = start_times + domain_boundaries
     return np.unique(np.asarray(combined, dtype=float)) 
 
 def _get_states_at(shape_summary, query_times):
@@ -93,6 +92,7 @@ def _get_states_at(shape_summary, query_times):
     shape_states= [state for state, _ in shape_summary]
     start_times = [time for _, time in shape_summary]
     indices = np.searchsorted(start_times, query_times, side="right") - 1
+    indices = np.clip(indices, 0, len(shape_states) - 1)
 
     # Return a list of shape states active at the provided query times
     return [shape_states[index] for index in indices]
@@ -117,17 +117,22 @@ def _get_state_signs(state_label):
     derivative_signs = state_signs.get(state_label)
     return derivative_signs
 
-def _compute_pointwise_distance(state_a, state_b, alpha=1/3, beta=1/6):
+def _compute_pointwise_distance(state_a, state_b, alpha=1/2, beta=1/4):
     """Return the weighted l1 distance between two shape states.
 
-    We compute the pointwise distance between two shape states as the weighted
-    Manhatten distance of the absolute disagreement in slope and in curvature:
+    We compute the pointwise distance between two shape states by first
+    comparing their slope signs. If the slopes agree, the states can only
+    differ in curvature, and the distance is the curvature disagreement
+    scaled by beta. If the slopes disagree, the curvature disagreement is
+    ignored and the distance is the slope disagreement scaled by alpha:
 
-        d(s_a, s_b) = alpha * |s_a1 - s_b1| + beta * |s_a2 - s_b2|
+        d(s_a, s_b) = beta  * |s_a2 - s_b2|,  if s_a1 == s_b1
+                    = alpha * |s_a1 - s_b1|,  otherwise
 
-    We enfore 2(alpha+beta)=1 to ensure d in [0, 1]. Further we set 
-    alpha > beta to make slope error more costly than a curvature error. 
-    As default we make slope errors twice as costly vs curvature errors.
+    We require alpha <= 1/2 and beta <= 1/2 to ensure d in [0, 1]. Further we
+    set alpha > beta to make a slope disagreement more costly than a
+    curvature-only disagreement. As default we make slope errors twice as
+    costly vs curvature errors.
 
     Args:
         state_a: str, shape state of the first summary.
@@ -136,22 +141,25 @@ def _compute_pointwise_distance(state_a, state_b, alpha=1/3, beta=1/6):
         beta: float, curvature disagreement weight.
 
     Returns:
-        float in [0, 1]; the pointwise distance, attaining 1 only where the two
-            states are diametrically opposed in both slope and curvature.
+        float in [0, 1]; the pointwise distance, attaining 1 only where the
+            two states have diametrically opposed slopes.
     """
-    # Ensure 2(alpha+beta)=1 so d in [0, 1] and that alpha > beta.
-    if (beta>alpha) or (2*(alpha+beta) != 1):
+    # Ensure d in [0, 1] and slope>curvature disagreement
+    if (beta>alpha) or (max(2*alpha, 2*beta) > 1):
         raise ValueError
 
     # Get the slope and curvature signs of both states.
     s_a1, s_a2 = _get_state_signs(state_a)
     s_b1, s_b2 = _get_state_signs(state_b)
 
-    # Compute the pointwise distance as the weighted Manhatten distance.
-    return alpha * abs(s_a1 - s_b1) + beta * abs(s_a2 - s_b2)
+    # Compute the pointwise distance 
+    if s_a1 == s_b1:
+        return beta * abs(s_a2 - s_b2)
+    else:
+        return alpha * abs(s_a1 - s_b1)
 
 
-def shape_summary_distance(summary_a, summary_b, T, alpha=1/3, beta=1/6):
+def shape_summary_distance(summary_a, summary_b, T, alpha=1/2, beta=1/4):
     """Return the distance between two shape summaries over [0, T].
 
     Shape summaries can disagree in their shape states and in the persistence
@@ -178,7 +186,7 @@ def shape_summary_distance(summary_a, summary_b, T, alpha=1/3, beta=1/6):
             identical summaries.
     """
     # Step 1: Merge the transition points into a sorted grid, including boundaries
-    gamma = _merge_transition_points(summary_a, summary_b, T)
+    gamma = _merge_transition_points([summary_a, summary_b], T)
 
     # Step 2: Obtain the regions spanned by gamma 
     regions = construct_regions(gamma)
@@ -200,7 +208,7 @@ def shape_summary_distance(summary_a, summary_b, T, alpha=1/3, beta=1/6):
     return float(D / T)
 
 
-def mean_shape_summary_distance(predicted, true, T, alpha=1/3, beta=1/6):
+def mean_shape_summary_distance(predicted, true, T, alpha=1/2, beta=1/4):
     """Compute the mean shape summary distance across a dataset.
 
     Args:
