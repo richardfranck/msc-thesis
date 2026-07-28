@@ -450,53 +450,58 @@ class TimeViewInferenceEngine:
         self.do_prune = do_prune
         self.normaliser = normaliser
 
-    def _get_mean_coefficients(self, x):
-        """Return the encoder's predicted B-spline coefficients h_theta(x) for one profile.
+    def _get_mean_coefficients(self, X):
+        """Return the encoder's predicted B-spline coefficients h_theta(x) for a batch of individuals.
 
         Analogue of InferenceEngine._get_mean_coefficients for the custom
         model, useful for inspecting what the encoder produces before it's
         multiplied through the B-spline basis.
 
         Args:
-            x: dict mapping each covariate name to a scalar value for one
-                individual.
+            X: dict mapping each covariate name to an np.ndarray of shape (D,)
+                holding that covariate's value for all D individuals.
 
         Returns:
-            coeff_vector: A torch.Tensor of shape (B,) of the mean coefficients.
+            coeff_vector: A torch.Tensor of shape (D, B) of the mean coefficients, one row per
+                individual.
         """
-        # Step 1: Normalise feature values
-        feature_values = self.normaliser.transform_one(x)
-        feature_values = np.array(feature_values, dtype=np.float32) # shape (M,)
-        feature_values = feature_values.reshape(1, -1) # shape (1, M)
+        # Step 1: Normalise feature values for the whole batch
+        feature_values = self.normaliser.transform(X) # (D, M)
+        feature_values = np.array(feature_values, dtype=np.float32) # (D, M)
 
         # Step 2: Get the B-spline coefficient predictions
-        coeff_vector = self.model.predict_latent_variables(feature_values)
-        coeff_vector = torch.from_numpy(coeff_vector).view(-1)
+        coeff_vector = self.model.predict_latent_variables(feature_values) # (D, B)
+        coeff_vector = torch.from_numpy(coeff_vector)
         return coeff_vector
 
-    def predict_mean_shape_summary(self, x):
-        """Predict the shape summary for the mean trajectory for one covariate dict x.
+    def predict_mean_shape_summary(self, X):
+        """Predict the shape summary for the mean trajectory for a batch of individuals.
 
         Args:
-            x: dict mapping each covariate name to a scalar value for one
-                individual.
+            X: dict mapping each covariate name to an np.ndarray of shape (D,).
 
         Returns:
-            a shape summary [(state, start_time), ...].
+            list of length D; element i is individual i's shape summary as a
+                list of (state, start_time) tuples
         """
-        w = self._get_mean_coefficients(x).reshape(-1, 1)  # (B, 1)
-        w = w.detach().cpu().numpy() #  extract_shape_summary needs numpy not torch.Tensor
-        shape_summary = extract_shape_summary(
-            w,
-            self.C,
-            self.breakpoints,
-            zeta_rel=self.zeta_rel,
-            upsilon_rel_1=self.upsilon_rel_1,
-            upsilon_rel_2=self.upsilon_rel_2,
-            upsilon_rel_prune=self.upsilon_rel_prune,
-            do_prune=self.do_prune,
-        )
-        return shape_summary
+        # Step 1: Perform one forward pass for the whole batch
+        W = self._get_mean_coefficients(X) # (D, B)
+        W = W.detach().cpu().numpy() #  extract_shape_summary needs numpy not torch.Tensor
+
+        # Step 2: Extract a summary per individual
+        summaries = []
+        for w in W:
+            summaries.append(extract_shape_summary(
+                w.reshape(-1, 1),
+                self.C,
+                self.breakpoints,
+                zeta_rel=self.zeta_rel,
+                upsilon_rel_1=self.upsilon_rel_1,
+                upsilon_rel_2=self.upsilon_rel_2,
+                upsilon_rel_prune=self.upsilon_rel_prune,
+                do_prune=self.do_prune,
+            ))
+        return summaries
 
 
     def predict_trajectory_values(self, x, times):

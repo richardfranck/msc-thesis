@@ -69,15 +69,16 @@ class InferenceEngine:
     # ------------------------- Point Prediction -------------------------
     ######################################################################
 
-    def _get_mean_coefficients(self, x):
-        """Predict mean spline coefficients (B,) for one covariate dict x.
+    def _get_mean_coefficients(self, X):
+        """Predict mean spline coefficients h_theta(x) for a batch of individuals.
 
         Args:
-            x: dict mapping each covariate name to a scalar value for one
-                individual.
+            X: dict mapping each covariate name to an np.ndarray of shape (D,)
+                holding that covariate's value for all D individuals
 
         Returns:
-            coeff_vector: A torch.Tensor of shape (B,) of the mean coefficients.
+            coeff_vector: A torch.Tensor of shape (D, B); the mean coefficients, 
+                one row per individual, in the normaliser's fitted column order.
         """
         # Check attributes are populated
         if self.populated is False:
@@ -85,26 +86,32 @@ class InferenceEngine:
         
         # Get the mean spline coefficients h_theta(x)
         self.model.eval()
-        z = self.normaliser.transform_one(x).unsqueeze(0)      # (1, M)
+        Z = self.normaliser.transform(X) # (D, M)
         with torch.no_grad():
-            coeff_vector =  self.model.get_coefficients(z).squeeze(0)        # (B,)
+            coeff_vector = self.model.get_coefficients(Z) # (D, B)
             return coeff_vector
 
 
-    def predict_mean_shape_summary(self, x):
-        """Predict the shape summary for the mean trajectory for one covariate dict x.
+    def predict_mean_shape_summary(self, X):
+        """Predict the mean-trajectory shape summary for a batch of individuals.
 
         Args:
-            x: dict mapping each covariate name to a scalar value for one
-                individual.
+            X: dict mapping each covariate name to an np.ndarray of shape (D,).
+
 
         Returns:
-            a shape summary [(state, start_time), ...].
+            list of length D; element i is individual i's shape summary as a
+                list of (state, start_time) tuples
         """
-        w = self._get_mean_coefficients(x).reshape(-1, 1)         # (B, 1)
-        w = w.detach().cpu().numpy()  # extract_shape_summary expects numpy
-        shape_summary = extract_shape_summary(
-                            w, 
+        # Step 1: Perform one forward pass for the whole batch
+        W = self._get_mean_coefficients(X) # (D, B)
+        W = W.detach().cpu().numpy()  # extract_shape_summary expects numpy
+
+        # Step 2: Extract a summary per individual 
+        summaries = []
+        for w in W:
+            summaries.append(extract_shape_summary(
+                            w.reshape(-1, 1), 
                             self.knot_objects["C"], 
                             self.knot_objects["breakpoints"], 
                             zeta_rel=self.shape_config["zeta_rel"],
@@ -112,8 +119,8 @@ class InferenceEngine:
                             upsilon_rel_2=self.shape_config["upsilon_rel_2"],
                             upsilon_rel_prune=self.shape_config["upsilon_rel_prune"],
                             do_prune=self.shape_config["do_prune"],
-        )
-        return shape_summary
+        ))
+        return summaries
 
     def predict_trajectory_values(self, x, times):
         """Predict mean trajectory values at `times` for one covariate dict x.
@@ -129,7 +136,11 @@ class InferenceEngine:
         Returns:
             torch.Tensor of shape (len(times),);
         """
-        w = self._get_mean_coefficients(x)                        # (B,)
+        # Step 1: Reformat individual covariate vector into batch dimension for _get_mean_coefficients
+        X = {name: np.asarray([value], dtype=float) for name, value in x.items()} # (1, M)
+        w = self._get_mean_coefficients(X)[0] # (B,)
+
+        # Step 2: Evaluate the spline and return to original units
         Phi = torch.as_tensor(basis_matrix(np.asarray(times, float),
                                            self.knot_objects["basis_functions"]))
         y_norm = Phi @ w
