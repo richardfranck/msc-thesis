@@ -5,7 +5,11 @@ import numpy as np
 from scripts.shape_uncertainty.shape_extraction.shape_summary import extract_shape_summary
 from scripts.shape_uncertainty.spline_basis.bspline_basis import basis_matrix
 
-
+# Uncertainty utilities
+from scripts.shape_uncertainty.shape_extraction.shape_uncertainty import (
+    compute_shape_uncertainty,
+    medoid_summary,
+)
 class InferenceEngine:
     """Compute trajectorfy forecast from a covariate vector.
 
@@ -34,6 +38,8 @@ class InferenceEngine:
             "do_prune": False,
         }
 
+        self.T = None
+
         self.populated = False
 
     def populate_attributes(self, model, normaliser, basis_functions, 
@@ -61,6 +67,9 @@ class InferenceEngine:
             self.shape_config["upsilon_rel_2"] = upsilon_rel_2
             self.shape_config["upsilon_rel_prune"] = upsilon_rel_prune
             self.shape_config["do_prune"] = do_prune
+
+        # Store forecasting horizon
+        self.T = None if breakpoints is None else breakpoints[-1]
 
         # Track whether the attributes have been filled yet
         self.populated = True
@@ -150,7 +159,7 @@ class InferenceEngine:
 
     # -------------- single-model aleatoric (deferred; needs Sigma_hat) --------------
 
-    def sample_aleatoric_coefficients(self, x, n_samples, rng=None):
+    def sample_aleatoric_coefficients(self, X, n_samples, rng=None):
         """Draw coefficient vectors h_theta(x) + u, u ~ N(0, Sigma_hat), for one x.
 
         The aleatoric cloud of coefficient vectors under THIS model: the mean
@@ -188,124 +197,182 @@ class InferenceEngine:
         pass
 
 
-
-
 class UncertaintyEngine:
-    """Quantify predictive uncertainty over shapes for a single covariate vector.
+    """Quantify predictive uncertainty over shapes across an ensemble of models.
 
-    Orchestrates an ENSEMBLE of trained models (each wrapped as an
-    InferenceEngine) to produce shape-uncertainty for one input. Handles the
-    layers a single model cannot:
-        - epistemic: variation ACROSS the ensemble (which data each model saw),
-        - combined:  the NESTED draw -- for each model (epistemic), draw many
-                     random effects u ~ N(0, Sigma_hat) (aleatoric, delegated to
-                     each member engine's sample_aleatoric_shapes),
-        - summarisation: modal shape + probability, and dispersion measures,
-        - the user-facing prediction that surfaces the mean-vs-modal contrast.
-    Aleatoric-only draws for a single model live on InferenceEngine; this class
-    consumes those and adds the cross-model and summarisation machinery.
+    This class operates on an ensemble of trained models, each wrapped as an 
+    InferenceEngins. Based on this, we expplore for every individual in a 
+    test set:
+
+        1. What is the individual's shape uncertainty U in [0, 1], defined as the
+           duration-weighted mean pairwise distance across the cloud. 
+
+        2. What is the consensus summart, i.e. the shape summary (and trajectory)
+            that best represents the cloud.
 
     Args:
-        engines: sequence of InferenceEngine instances (the trained ensemble);
-            each contributes its own Sigma_hat for the inner aleatoric draws.
+        engines: sequence of InferenceEngine instances, the trained ensemble.
     """
-
     def __init__(self, engines):
         self.engines = engines
 
-    def sample_epistemic_shapes(self, x):
-        """Epistemic shape distribution for one x across the ensemble.
-
-        Extracts each member model's predicted MEAN shape, yielding the
-        epistemic shape distribution (variation due to which data each model was
-        trained on).
-        [Deferred: requires the bootstrap/ensemble training infrastructure.]
-
-        Args:
-            x: dict of one individual's raw covariates.
+    @property
+    def T(self):
+        """The forecasting horizon.
 
         Returns:
-            list of shape summaries, one per ensemble model.
+            float; the right endpoint of [0, T].
         """
-        pass
+        horizons = {engine.T for engine in self.engines}
+        if len(horizons) != 1:
+            raise ValueError(f"Ensemble members disagree on the horizon: {horizons}.")
 
-    def sample_combined_shapes(self, x, n_aleatoric, rng=None):
-        """Full predictive shape distribution for one x: NESTED epistemic x aleatoric.
+        return horizons.pop()
 
-        Outer loop over the ensemble (epistemic); inner loop draws n_aleatoric
-        random effects within each model via that member's
-        sample_aleatoric_shapes (aleatoric). The pooled cloud mixes both sources
-        and is decomposable (across-model-mean variation = epistemic; mean
-        within-model spread = aleatoric). A NESTED draw, not a concatenation of
-        two independent clouds.
-        [Deferred: requires member Sigma_hat, the ensemble, and the
-        shape-distribution machinery.]
+    def _build_shape_summaries(self, X):
+        """Build every individual's cloud of M shape summaries.
 
         Args:
-            x: dict of one individual's raw covariates.
-            n_aleatoric: int, aleatoric draws per model.
-            rng: random generator.
+            X: dict mapping each covariate name to an np.ndarray of shape (D,)
+                holding that covariate's value for all D individuals.
 
         Returns:
-            the combined cloud of shape summaries (and/or a structure retaining
-            the per-model grouping for decomposition).
+            list of length D; element i is the list of M shape summaries the
+                ensemble assigns to individual i, in engine order.
         """
-        pass
+        # This is a list of lists. The outer list is of length M with one element per
+        # engine. The inner lists are of dimension D, with one summary per person. 
+        # summaries_by_model = [
+        #    ["M0_P0", "M0_P1", "M0_P2"],  # Model 0's predictions
+        #    ["M1_P0", "M1_P1", "M1_P2"],  # Model 1's predictions
+        # ]
+        summaries_by_model = [
+            engine.predict_mean_shape_summary(X) for engine in self.engines
+        ]
 
-    def modal_shape(self, shape_distribution):
-        """Most probable shape summary in a distribution, and its probability.
+        # Group predictions by person
+        # (
+        #    (M0_P0, M1_P0, ...), # Person 0's predictions
+        #    (M0_P1, M1_P1, ...), # Person 1's predictions
+        #    (M0_P2, M1_P2, ...)  # Person 2's predictions
+        # )
+        summaries_by_individual = zip(*summaries_by_model)
+        
+        # Convert the inner tuples to lists
+        summaries_by_individual = [
+            list(prediction) for prediction in summaries_by_individual
+        ] 
 
-        Returns the modal composition (most frequent state sequence) and the
-        fraction of the cloud exhibiting it.
-        [Deferred: requires the shape-distribution machinery.]
+        return summaries_by_individual
+
+    def _compute_shape_uncertainty(self, shape_distribution, alpha=1/2, beta=1/4):
+        """Score how much one cloud of summaries disagrees.
 
         Args:
-            shape_distribution: list of shape summaries (aleatoric, epistemic, or
-                combined).
+            shape_distribution: list of M shape summaries over [0, T].
+            alpha: float, slope disagreement weight.
+            beta: float, curvature disagreement weight.
 
         Returns:
-            (modal_summary, probability): the modal shape and its frequency in [0,1].
+            Tuple (U, profile) where 
+            - U is a float in [0, 1], zero for a unanimous ensemble 
+            - profile is a dict with 
+            profile = {
+                'regions':            np.ndarray (n, 2) -- region boundaries R_k
+                'lengths':            np.ndarray (n,)   -- region durations L_k
+                'region_uncertainty': np.ndarray (n,)   -- regional uncertainty Q_k
+                'state_histograms':   np.ndarray (n, V) -- state histograms n_k
+                'state_indices': state_indices
+            }
         """
-        pass
+        U, profile = compute_shape_uncertainty(shape_distribution, self.T, alpha, beta)
+        return U, profile
 
-    def shape_uncertainty(self, shape_distribution):
-        """Dispersion measures over a shape distribution.
-
-        Summarises a cloud of shape summaries into uncertainty measures (e.g.
-        entropy over distinct compositions, per-transition timing dispersion).
-        [Deferred: requires the shape-distribution machinery; relates to M7.]
+    def _compute_consensus_summary(self, shape_distribution, profile, alpha=1/2, beta=1/4):
+        """Select the summary that best represents one cloud.
 
         Args:
-            shape_distribution: list of shape summaries.
+            shape_distribution: list of M shape summaries over [0, T].
+            profile: dict as returned by _compute_shape_uncertainty for THIS
+                cloud.
+            alpha: float, slope disagreement weight.
+            beta: float, curvature disagreement weight. 
 
         Returns:
-            dict of dispersion measures.
+            tuple (consensus, member_index):
+                consensus: the selected shape summary.
+                member_index: int; index for which ensemble member supplied consensus. 
         """
-        pass
+        consensus, member_index = medoid_summary(
+            shape_distribution, self.T, profile, alpha, beta,
+        )
+        return consensus, member_index
 
-    def predict_with_uncertainty(self, x, n_aleatoric, rng=None):
-        """User-facing prediction for one x: cloud, modal shape, and the contrast.
+    def predict_with_uncertainty(self, X, alpha=1/2, beta=1/4):
+        """Report the ensemble's shape uncertainty and consensus for every individual.
 
-        Assembles the full per-input output using the NESTED combined draw:
-            - the mean-coefficient trajectory (conventional point estimate),
-            - a representative curve for the MODAL shape and its probability,
-            - the combined epistemic x aleatoric shape cloud,
-            - the shape-uncertainty measures.
-        Surfaces the CONTRAST between the mean-coefficient curve and the modal-
-        shape curve: agreement => clean prediction; divergence => multimodal /
-        unrepresentative mean (the high-uncertainty case).
-        [Deferred: requires sample_combined_shapes, modal_shape, shape_uncertainty.]
+        This serves as the entry for analyis. For each individual:
+
+            - build the ensemble's cloud of M summaries,
+            - compute the uncertainty and uncertainty profile
+            - selects one consensus summary
+    
+        Args:
+            X: dict mapping each covariate name to an np.ndarray of shape (D,)
+                holding that covariate's value for all D individuals.
+            alpha: float, slope disagreement weight.
+            beta: float, curvature disagreement weight.
+
+        Returns:
+            dict with keys:
+                "U": np.ndarray (D,); shape uncertainty 
+                "profiles": list of length D of uncertainty profiles,
+                "consensus": list of length D; the shape summary the
+                    ensemble reports for each individual.
+                "member_indices": np.ndarray (D,) of int; which member supplied
+                                 each consensus.
+        """
+        # Step 1: Build every individual's cloud of M summaries
+        shapes = self._build_shape_summaries(X)
+        D = len(shapes)
+
+        # Step 2: Compute uncertainties + profile and consensus for all individuals
+        U = np.empty(D, dtype=float)
+        member_indices = np.empty(D, dtype=int)
+        profiles, consensus = [], []
+
+        for i, shape_distribution in enumerate(shapes):
+            U[i], profile = self._compute_shape_uncertainty(shape_distribution, alpha, beta)
+            best_summary, member_indices[i] = self._compute_consensus_summary(shape_distribution, profile, alpha, beta)
+            profiles.append(profile)
+            consensus.append(best_summary)
+
+        predictions = {"U": U, 
+                        "consensus": consensus, 
+                        "member_indices": member_indices,
+                        "profiles": profiles,
+        }
+
+        return predictions
+
+
+    @staticmethod
+    def rank_by_uncertainty(result):
+        """Individual indices ordered from most to least uncertain.
+
+        We rank individuals based on their associated uncertainty score U. 
+        We then explore the individuals with the highest and lowest uncertainty
+        level.
 
         Args:
-            x: dict of one individual's raw covariates.
-            n_aleatoric: int, aleatoric draws per model.
-            rng: random generator.
+            result: dict as returned by predict_with_uncertainty.
 
         Returns:
-            dict with the mean trajectory, the modal-shape trajectory and its
-                probability, the shape cloud, and the uncertainty measures.
+            np.ndarray of int; individual indices, most uncertain first. Ties are
+                broken towards the smaller index.
         """
-        pass
+        order = np.argsort(-result["U"], kind="stable")
+        return order 
 
 
 

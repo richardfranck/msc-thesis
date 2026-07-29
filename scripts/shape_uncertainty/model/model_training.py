@@ -330,7 +330,7 @@ class Tuner:
         return random_effects_model
 
 
-    def _train_re_model(self, hyperparas, train_batch, val_batch):
+    def _train_re_model(self, hyperparas, train_batch, val_batch, rng=None):
         """Build and train a model for one hyperparameter configuration.
 
         Step 1: Construct the model from hyperparas and the batch's covariate dimension, 
@@ -342,6 +342,10 @@ class Tuner:
             hyperparas: dict of sampled hyperparameters
             train_batch: the prepared training Batch
             val_batch: the prepared validation Batch
+            rng: np.random.Generator or None; drives mini-batch shuffling. When
+                None, train() falls back to its own fixed default, so every call
+                walks the data in the same order.
+
 
         Returns:
             RandomEffectModel; the trained model (best-validation state restored).
@@ -352,7 +356,8 @@ class Tuner:
         # Step 2: Run the training loop
         train_result = train(model, train_batch, self.Omega, self.lambda_mean, self.lambda_re,
                         lr=hyperparas["lr"], weight_decay=hyperparas["weight_decay"], nr_epochs=self.nr_epochs,
-                        batch_size=hyperparas["batch_size"], val_batch=val_batch, patience=self.patience)
+                        batch_size=hyperparas["batch_size"], val_batch=val_batch, patience=self.patience,
+                        rng=rng)
                     
         # Step 3: Return the best model 
         return train_result["model"]
@@ -412,7 +417,7 @@ class Tuner:
             "weight_decay": b["weight_decay"],
         }
 
-    def run(self, nr_trials=100):
+    def run(self, nr_trials=100, seed=None):
         """Run the search and retrain the best configuration.
         
         Step 1: Optimise the validation objective over nr_trials, 
@@ -423,6 +428,7 @@ class Tuner:
 
         Args:
             nr_trials: int; number of Optuna trials.
+            seed: int 
 
         Returns:
             dict with keys:
@@ -437,7 +443,10 @@ class Tuner:
 
         # Step 2: Optimise the validation objective; the lambda injects the shared
         #         batches into Optuna's single-argument objective callable.
-        study = optuna.create_study(direction="minimize")
+        study = optuna.create_study(
+                direction="minimize", 
+                sampler=optuna.samplers.TPESampler(seed=seed),
+        )
         study.optimize(
             lambda trial: self._execute_optuna_trial_iteration(trial, train_batch, val_batch),
             n_trials=nr_trials,
@@ -451,7 +460,7 @@ class Tuner:
                 "model": model, "normaliser": normaliser, "study": study}
 
 
-    def train_fixed_configuration(self, hyperparas):
+    def train_fixed_configuration(self, hyperparas, rng=None):
         """Train a model for a GIVEN hyperparameter configuration (no Optuna search).
 
         Train a model with the given hyperparam config on the training data 
@@ -460,20 +469,20 @@ class Tuner:
         Args:
             hyperparas: dict shaped like run()'s "best_params" (hidden_sizes,
                 activation, dropout, lr, batch_size, weight_decay).
+            rng: np.random.Generator or None; mini-batch shuffling order.
 
         Returns:
             dict with keys:
                 "best_params": the best structured hyperparameter dict,
                 "best_value": the best validation objective achieved,
                 "model": the retrained best RandomEffectsModel,
-                "normaliser": the fitted covariate normaliser,
-                "study": the completed optuna.Study.
+                "normaliser": the fitted covariate normaliser
         """
         # Step 1: Prepare train/validation batches  
         train_batch, val_batch, normaliser = self._prepare_batches()
 
         # Step 2: Train at the given hyperparameters, no search
-        model = self._train_re_model(hyperparas, train_batch, val_batch)
+        model = self._train_re_model(hyperparas, train_batch, val_batch, rng=rng)
 
         # Step 3: Score on validation for logging/provenance
         best_value = evaluate_objective(model, val_batch, self.Omega,

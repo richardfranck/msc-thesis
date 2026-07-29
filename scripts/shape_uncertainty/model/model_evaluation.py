@@ -1,6 +1,11 @@
 import torch
 import numpy as np
 
+from scripts.shape_uncertainty.shape_extraction.shape_distance import (
+    mean_shape_sequence_match,
+    mean_shape_summary_distance,
+)
+
 class ModelEvaluator:
     """Assess a trained model's fit and shape extraction on a simulated test dataset.
 
@@ -66,7 +71,7 @@ class ModelEvaluator:
         r_squared = 1 - (rss/tss)
         return r_squared
 
-    def compute_value_space_accuracy(self):
+    def compute_value_space_metrics(self):
         """Compute RMSE and R-squared of predicted vs true noise-free values.
 
         Compares each individual's predicted trajectory against its stored
@@ -91,8 +96,25 @@ class ModelEvaluator:
         # Return value space metrics
         return {"rmse": rmse, "r2": r_squared}
 
+    def compute_shape_space_metrics(self, true_summaries):
+        """Score the model's predicted shape summaries against the analytics summaries.
 
+        Args:
+            true_summaries: list of length D of reference shape summaries,
+                extracted at the same thresholds as the engine's, so both are
+                expressed in one vocabulary.
 
+        Returns:
+            dict with keys "accuracy" (exact state-sequence match share, higher
+                is better) and "distance" (mean shape-summary distance, lower is
+                better).
+        """
+        predicted = self.inference_engine.predict_mean_shape_summary(self.dataset.X)
+        return {
+            "accuracy": mean_shape_sequence_match(predicted, true_summaries),
+            "distance": mean_shape_summary_distance(predicted, true_summaries,
+                                                    self.dataset.T),
+        }
 
 
 
