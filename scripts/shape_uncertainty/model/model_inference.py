@@ -86,7 +86,7 @@ class InferenceEngine:
                 holding that covariate's value for all D individuals
 
         Returns:
-            coeff_vector: A torch.Tensor of shape (D, B); the mean coefficients, 
+            W: A torch.Tensor of shape (D, B); the mean coefficients, 
                 one row per individual, in the normaliser's fitted column order.
         """
         # Check attributes are populated
@@ -97,9 +97,32 @@ class InferenceEngine:
         self.model.eval()
         Z = self.normaliser.transform(X) # (D, M)
         with torch.no_grad():
-            coeff_vector = self.model.get_coefficients(Z) # (D, B)
-            return coeff_vector
+            W = self.model.get_coefficients(Z) # (D, B)
+            return W
 
+    def _extract_summaries(self, W):
+        """Extract a shape summary from each of a stack of coefficient vectors.
+
+        Args:
+            W: np.ndarray of shape (N, B); one coefficient vector per row.
+
+        Returns:
+            list of length N of shape summaries, each a list of
+                (state, start_time) tuples.
+        """
+        summaries = []
+        for w in W:
+            summaries.append(extract_shape_summary(
+                w.reshape(-1, 1),
+                self.knot_objects["C"],
+                self.knot_objects["breakpoints"],
+                zeta_rel=self.shape_config["zeta_rel"],
+                upsilon_rel_1=self.shape_config["upsilon_rel_1"],
+                upsilon_rel_2=self.shape_config["upsilon_rel_2"],
+                upsilon_rel_prune=self.shape_config["upsilon_rel_prune"],
+                do_prune=self.shape_config["do_prune"],
+            ))
+        return summaries
 
     def predict_mean_shape_summary(self, X):
         """Predict the mean-trajectory shape summary for a batch of individuals.
@@ -117,18 +140,8 @@ class InferenceEngine:
         W = W.detach().cpu().numpy()  # extract_shape_summary expects numpy
 
         # Step 2: Extract a summary per individual 
-        summaries = []
-        for w in W:
-            summaries.append(extract_shape_summary(
-                            w.reshape(-1, 1), 
-                            self.knot_objects["C"], 
-                            self.knot_objects["breakpoints"], 
-                            zeta_rel=self.shape_config["zeta_rel"],
-                            upsilon_rel_1=self.shape_config["upsilon_rel_1"],
-                            upsilon_rel_2=self.shape_config["upsilon_rel_2"],
-                            upsilon_rel_prune=self.shape_config["upsilon_rel_prune"],
-                            do_prune=self.shape_config["do_prune"],
-        ))
+        summaries = self._extract_summaries(W)
+
         return summaries
 
     def predict_trajectory_values(self, x, times):
@@ -157,44 +170,195 @@ class InferenceEngine:
         y = self.normaliser.inverse_transform_y(y_norm)
         return torch.as_tensor(y)
 
-    # -------------- single-model aleatoric (deferred; needs Sigma_hat) --------------
+    ######################################################################
+    #######     Aleatoric uncertainty for a single model            ######
+    ######################################################################
 
-    def sample_aleatoric_coefficients(self, X, n_samples, rng=None):
-        """Draw coefficient vectors h_theta(x) + u, u ~ N(0, Sigma_hat), for one x.
+    def _cholesky_factor(self):
+        """Return the cholesky factor L of the random-effects covariance.
 
-        The aleatoric cloud of coefficient vectors under THIS model: the mean
-        coefficients perturbed by random-effect draws from this model's trained
-        covariance. The single-model building block that UncertaintyEngine nests
-        over an ensemble.
-        [Deferred: requires the trained model's Sigma_hat.]
-
-        Args:
-            x: dict of one individual's raw covariates.
-            n_samples: int, number of aleatoric draws.
-            rng: random generator.
+        Return the cholesky factor needed for smapling. 
+        For sampling we require u ~ N(0, Sigma). The model parameterises Sigma
+        through the cholesky factor L, with Sigma = L L^T.
+        Let z ~ N(0, I), then we obtain u as 
+                                u = L z
+        and can draw samples from it.
 
         Returns:
-            torch.Tensor of shape (n_samples, B); the perturbed coefficient draws.
+            torch.Tensor of shape (B, B); the lower-triangular factor.
         """
-        pass
+        # Step 1: Check attributes are populated
+        if self.populated is False:
+            raise RuntimeError("Call 'populate_attributes()' first.")
 
-    def sample_aleatoric_shapes(self, x, n_samples, rng=None):
-        """Aleatoric shape distribution for one x under THIS model.
+        # Step 2: Raise an error if the model has no random effects (i.e. MeanOnly)
+        if not hasattr(self.model, "cholesky_factor"):
+            raise RuntimeError(
+                f"{type(self.model).__name__} has no random-effects covariance.")
 
-        Extracts a shape summary from each aleatoric coefficient draw, yielding
-        the within-model aleatoric shape distribution for a single covariate
-        vector.
-        [Deferred: requires Sigma_hat and the shape-distribution machinery.]
+        # Step 3: Return the cholesky facotor
+        with torch.no_grad():
+            return self.model.cholesky_factor().detach()
+    
+    @property
+    def sigma_hat(self):
+        """Return the trained random-effects covariance Sigma = L L^T.
 
-        Args:
-            x: dict of one individual's raw covariates.
-            n_samples: int, number of aleatoric draws.
-            rng: random generator.
+        Return the estimated aleatoric variance covariance matrix for examination
+        (not for sampling).
+        On data generated without unobserved heterogeneity this should be zero.
 
         Returns:
-            list of n_samples shape summaries (the aleatoric shape cloud).
+            np.ndarray of shape (B, B); symmetric positive-definite.
         """
-        pass
+        L = self._cholesky_factor()
+        return (L @ L.T).cpu().numpy()
+
+
+    def _draw_random_effects(self, nr_individuals, n_samples, rng):
+        """Draw random-effect vectors u ~ N(0, Sigma).
+
+        Draw the a sepcified number of random-effect vectors (n_samples) for 
+        the specified number of individuals (e.g. for everyone in the test set).
+        While every draw comes from the same distribution u ~ N(0, Sigma), we make
+        independent n_samples draws for each individual. 
+        Draws come from 
+                    u = L z with z ~ N(0, I)
+
+        Args:
+            nr_individuals: int, D; how many individuals to draw for.
+            n_samples: int, n; draws per individual.
+            rng: np.random.Generator or int seed.
+
+        Returns:
+            torch.Tensor of shape (D, n, B); the random-effect draws.
+        """
+        # Step 1: Accept a Generator or an int seed
+        rng = np.random.default_rng(rng)
+
+        # Step 2: Draw standard normals, one B-vector per (individual, sample)
+        L = self._cholesky_factor() # (B, B)
+        nr_basis = L.shape[0] # scalar B
+        z = rng.standard_normal((nr_individuals, n_samples, nr_basis)) # (D, n, B) i.i.d. N(0,1), numpy float64
+        z = torch.as_tensor(z, dtype=L.dtype) # same values, cast to L's dtype
+
+        # Step 3: Correlate draw through the Cholesky factor.
+        # Here z is a row vector so z L^T gives Cov(u) = L L^T = Sigma.
+        return z @ L.T # (D, n, B)
+
+    ######################################################################
+    # ------------------------- Aleatoric Prediction ---------------------
+    ######################################################################
+
+    def _get_aleatoric_coefficients(self, X, n_samples, rng):
+        """Draw coefficient vectors h_theta(x) + u for a batch of individuals.
+
+        Under a model with random effects we obtain an indivdual's coefficient 
+        vector as the individual's mean coefficients perturbed by random-effect 
+        draws from the model's own trained covariance. 
+        This function draws a clound of #n_samples random effect pertubations and
+        returns the cloud of perturbed indivdual's coefficient vectors.
+
+        Args:
+            X: dict mapping each covariate name to an np.ndarray of shape (D,)
+                holding that covariate's value for all D individuals.
+            n_samples: int, n; aleatoric draws per individual.
+            rng: np.random.Generator.
+
+        Returns:
+            torch.Tensor of shape (D, n, B); element [d, k] is individual d's
+                k-th coefficient draw.
+        """
+        # Step 1: Get every individual's mean coefficients
+        H = self._get_mean_coefficients(X) # (D, B)
+
+        # Step 2: Draw the random effects for the whole batch
+        U = self._draw_random_effects(H.shape[0], n_samples, rng)  # (D, n, B)
+
+        # Step 3: Perturb each individual's mean by each of its draws
+        return H.unsqueeze(1) + U # (D, 1, B) + (D, n, B) = (D, n, B)
+
+    def predict_aleatoric_summaries(self, X, n_samples, rng):
+        """Get the aleatoric shape distribution for a batch of individuals.
+
+        This is the counterpart to predict_mean_shape_summary for a MeanOnlyModel
+        We obtain the cloud of summaries for each individual under the given model.
+        The spread of the cloud is the irreducable aleatoric shape uncertainty. 
+        It is the uncetainty inshapes that exists between individuals sharing 
+        the same covariates.
+
+        Args:
+            X: dict mapping each covariate name to an np.ndarray of shape (D,).
+            n_samples: int, n; aleatoric draws per individual.
+            rng: np.random.Generator
+
+        Returns:
+            list of length D; element d is the list of n shape summaries drawn
+                for individual d.
+        """
+        # Step 1: Draw the coefficient cloud
+        # W[d, k] is individual d's k-th coefficient draw (of B coeffs), so each individual
+        # has an (n, B) block of draws:
+        #    W = [
+        #       [[P0_S0], [P0_S1], ...],   # Person 0's n draws
+        #       [[P1_S0], [P1_S1], ...],   # Person 1's n draws
+        #       [[P2_S0], [P2_S1], ...],   # Person 2's n draws
+        #    ]
+        W = self.sample_aleatoric_coefficients(X, n_samples, rng)   # (D, n, B)
+        D, n, B = W.shape
+
+        # Step 2: Extract shape summaries for every draw 
+        # _extract_summaries loops over the rows of a 2-D (N, B) array, so the
+        # (D, n, B) cloud must be collapsed to (D*n, B). We then have
+        #    W = [
+        #       [P0_S0], [P0_S1], ..., # rows 0 to n-1 are person 0
+        #       [P1_S0], [P1_S1], ..., # rows n to 2n-1 are person 1
+        #       [P2_S0], [P2_S1], ..., # rows 2n to 3n-1 are person 2
+        #    ]
+        # detach drops the autograd graph, cpu pulls the draws off any device,
+        # and numpy hands extract_shape_summary the array type it expects.
+        W = W.detach().cpu().numpy().reshape(D * n, B)
+        summaries = self._extract_summaries(W) # summaries = [P0_S0, P0_S1, ..., P1_S0, P1_S1, ..., P2_S0, ...]
+
+        # Step 3: Regroup into one cloud per individual
+        # Undo the flattening by cutting the list into the D blocks of n
+        # consecutive summaries. Individual d owns rows d*n up to but 
+        # excluding (d+1)*n:
+        #    [
+        #       [P0_S0, P0_S1, ...],   # Person 0's aleatoric cloud
+        #       [P1_S0, P1_S1, ...],   # Person 1's aleatoric cloud
+        #       [P2_S0, P2_S1, ...],   # Person 2's aleatoric cloud
+        #    ]
+        return [summaries[d * n:(d + 1) * n] for d in range(D)]
+
+
+    def predict_aleatoric_trajectories(self, X, times, n_samples, rng):
+       """Predict trajectory values of all aleatoric draws at `times` for one 
+          covariate dict x.
+       
+        We use this function to plot the trajectory of a given covariate vector. 
+
+        Args:
+            X: dict mapping each covariate name to an np.ndarray of shape (D,).
+            times: 1-D sequence of N time points in [0, T].
+            n_samples: int, n; aleatoric draws per individual.
+            rng: np.random.Generator or None; None uses a generator seeded with 0.
+
+        Returns:
+            np.ndarray of shape (D, n, N); predicted values in original units.
+        """
+        # Step 1: Draw the coefficient cloud
+        W = self.sample_aleatoric_coefficients(X, n_samples, rng)   # (D, n, B)
+
+        # Step 2: Evaluate the spline basis once and apply it to every draw
+        Phi = torch.as_tensor(basis_matrix(np.asarray(times, float),
+                                           self.knot_objects["basis_functions"]))
+        Y_norm = (W @ Phi.T) # (D, n, N)
+        Y_norm  = Y_norm.detach().cpu().numpy()
+
+        # Step 3: Return to original units
+        Y = self.normaliser.inverse_transform_y(Y_norm)
+        return torch.as_tensor(Y)
 
 
 class UncertaintyEngine:
