@@ -32,8 +32,9 @@ class ModelEvaluator:
         """
         covariates = self.dataset.individual_covariates()
         times = self.dataset.times
+
         return [
-            self.inference_engine.predict_trajectory_values(x, t).detach().cpu().numpy()
+            self.inference_engine.predict_trajectory(x, t)[0]
             for x, t in zip(covariates, times)
         ]
 

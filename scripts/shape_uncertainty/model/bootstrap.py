@@ -11,6 +11,7 @@ from scripts.shape_uncertainty.model.model_inference import InferenceEngine
 
 from scripts.shape_uncertainty.spline_basis.bspline_basis import build_knot_dictionary
 from scripts.shape_uncertainty.experiments.utilities import save_run, load_run
+from scripts.shape_uncertainty.model.model_inference import build_inference_engine
 
 
 class BootstrapEnsemble:
@@ -284,20 +285,12 @@ class BootstrapEnsemble:
         Returns:
             InferenceEngine; populated and ready to predict.
         """
-        engine = InferenceEngine()
-        engine.populate_attributes(
+        return build_inference_engine(
             model=model,
             normaliser=normaliser,
-            basis_functions=self.knot_objects["basis_functions"],
-            C=self.knot_objects["C"],
-            breakpoints=self.knot_objects["breakpoints"],
-            zeta_rel=self.shape_config["zeta_rel"],
-            upsilon_rel_1=self.shape_config["upsilon_rel_1"],
-            upsilon_rel_2=self.shape_config["upsilon_rel_2"],
-            upsilon_rel_prune=self.shape_config["upsilon_rel_prune"],
-            do_prune=self.shape_config["do_prune"],
+            knot_objects=self.knot_objects,
+            shape_config=self.shape_config,
         )
-        return engine
 
 
     def fit(self, nr_members=100):
