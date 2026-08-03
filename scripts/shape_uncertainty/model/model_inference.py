@@ -274,7 +274,7 @@ class InferenceEngine:
     # ------------------------- Aleatoric Prediction ---------------------
     ######################################################################
 
-    def _get_aleatoric_coefficients(self, X, n_samples, rng):
+    def draw_aleatoric_coefficients(self, X, n_samples, rng):
         """Draw coefficient vectors h_theta(x) + u for a batch of individuals.
 
         Under a model with random effects we obtain an indivdual's coefficient 
@@ -290,9 +290,17 @@ class InferenceEngine:
             rng: np.random.Generator.
 
         Returns:
-            torch.Tensor of shape (D, n, B); element [d, k] is individual d's
+            np.ndarray of shape (D, n, B); element [d, k] is individual d's
                 k-th coefficient draw.
         """
+        # H+U -> W[d, k] is individual d's k-th coefficient draw (of B coeffs), so each individual
+                # has an (n, B) block of draws:
+                #    W = [
+                #       [[P0_S0], [P0_S1], ...],   # Person 0's n draws
+                #       [[P1_S0], [P1_S1], ...],   # Person 1's n draws
+                #       [[P2_S0], [P2_S1], ...],   # Person 2's n draws
+                #    ]
+
         # Step 1: Get every individual's mean coefficients
         H = self._get_mean_coefficients(X) # (D, B)
 
@@ -300,9 +308,10 @@ class InferenceEngine:
         U = self._draw_random_effects(H.shape[0], n_samples, rng)  # (D, n, B)
 
         # Step 3: Perturb each individual's mean by each of its draws
-        return H.unsqueeze(1) + U # (D, 1, B) + (D, n, B) = (D, n, B)
+        W = H.unsqueeze(1) + U # (D, 1, B) + (D, n, B) = (D, n, B)
+        return W.detach().cpu().numpy()
 
-    def predict_aleatoric_summaries(self, X, n_samples, rng):
+    def predict_aleatoric_summaries(self, coefficients):
         """Get the aleatoric shape distribution for a batch of individuals.
 
         This is the counterpart to predict_mean_shape_summary for a MeanOnlyModel
@@ -312,26 +321,12 @@ class InferenceEngine:
         the same covariates.
 
         Args:
-            X: dict mapping each covariate name to an np.ndarray of shape (D,).
-            n_samples: int, n; aleatoric draws per individual.
-            rng: np.random.Generator
+            coefficients: np.ndarray (D, n, B) from draw_aleatoric_coefficients
 
         Returns:
-            list of length D; element d is the list of n shape summaries drawn
-                for individual d.
+            list of length D; element d is that individual's list of n shape summaries.
         """
-        # Step 1: Draw the coefficient cloud
-        # W[d, k] is individual d's k-th coefficient draw (of B coeffs), so each individual
-        # has an (n, B) block of draws:
-        #    W = [
-        #       [[P0_S0], [P0_S1], ...],   # Person 0's n draws
-        #       [[P1_S0], [P1_S1], ...],   # Person 1's n draws
-        #       [[P2_S0], [P2_S1], ...],   # Person 2's n draws
-        #    ]
-        W = self._get_aleatoric_coefficients(X, n_samples, rng)   # (D, n, B)
-        D, n, B = W.shape
-
-        # Step 2: Extract shape summaries for every draw 
+        # Extract shape summaries for every draw 
         # _extract_summaries loops over the rows of a 2-D (N, B) array, so the
         # (D, n, B) cloud must be collapsed to (D*n, B). We then have
         #    W = [
@@ -341,7 +336,8 @@ class InferenceEngine:
         #    ]
         # detach drops the autograd graph, cpu pulls the draws off any device,
         # and numpy hands extract_shape_summary the array type it expects.
-        W = W.detach().cpu().numpy().reshape(D * n, B)
+        D, n, B = coefficients.shape  # (D, n, B)
+        W = coefficients.reshape(D * n, B)
         summaries = self._extract_summaries(W) # summaries = [P0_S0, P0_S1, ..., P1_S0, P1_S1, ..., P2_S0, ...]
 
         # Step 3: Regroup into one cloud per individual
@@ -356,34 +352,24 @@ class InferenceEngine:
         return [summaries[d * n:(d + 1) * n] for d in range(D)]
 
 
-    def predict_aleatoric_trajectories(self, X, times, n_samples, rng):
+    def predict_aleatoric_trajectories(self, coefficients, times):
         """Predict trajectory values of all aleatoric draws at `times` for one 
           covariate dict x.
        
         We use this function to plot the trajectory of a given covariate vector. 
 
         Args:
-            X: dict mapping each covariate name to an np.ndarray of shape (D,).
+            coefficients: np.ndarray (D, n, B) from draw_aleatoric_coefficients
             times: 1-D sequence of N time points in [0, T].
-            n_samples: int, n; aleatoric draws per individual.
-            rng: np.random.Generator or int seed
+
         Returns:
             np.ndarray of shape (D, n, N); predicted values in original units.
         """
-        # Step 1: Reset random number generator
-        rng = np.random.default_rng(rng)
+        # Step 1: Evaluate the spline basis once and apply it to every draw.
+        Phi = basis_matrix(np.asarray(times, float), self.knot_objects["basis_functions"])                      # (N, B)
+        Y_norm = (coefficients @ Phi.T)                                      # (D, n, N)
 
-        # Step 2: Draw the coefficient cloud
-        W = self._get_aleatoric_coefficients(X, n_samples, rng)   # (D, n, B)
-
-        # Step 3: Evaluate the spline basis once and apply it to every draw.
-        Phi = torch.as_tensor(basis_matrix(np.asarray(times, float),
-                                           self.knot_objects["basis_functions"]),
-                              dtype=W.dtype)                      # (N, B)
-        Y_norm = (W @ Phi.T)                                      # (D, n, N)
-        Y_norm = Y_norm.detach().cpu().numpy()
-
-        # Step 4: Return to original units
+        # Step 2: Return to original units
         Y = self.normaliser.inverse_transform_y(Y_norm)
         return Y
 
@@ -474,11 +460,18 @@ class UncertaintyEngine:
                 Defaults to zero which is the case where we have no ensemble. 
 
         Returns:
-            list of length D; element i is the list of n shape summaries drawn
-                for individual i.
+            tuple (clouds, coefficients):
+                clouds: list of length D; element i is the list of n shape
+                    summaries drawn for individual i.
+                coefficients: np.ndarray of shape (D, n, B); the draws those
+                    summaries came from, returned so a caller can evaluate the
+                    very same sample as trajectories rather than redrawing it.
         """
-        return self.engines[member].predict_aleatoric_summaries(X, n_samples, rng)
+        engine = self.engines[member]
+        coefficients = engine.draw_aleatoric_coefficients(X, n_samples, rng)
+        summaries = engine.predict_aleatoric_summaries(coefficients)
 
+        return summaries, coefficients
 
     def _compute_shape_uncertainty(self, shape_distribution, alpha=1/2, beta=1/4):
         """Score how much one cloud of summaries disagrees.
@@ -622,10 +615,18 @@ class UncertaintyEngine:
 
         Returns:
             dict as described in _build_uncertainty_result()
+            + the coefficents of the aleatoric draws under "coefficients" (np.ndarray of shape (D, n, B))
         """
-        clouds = self._build_aleatoric_shape_summaries(X, n_samples, rng, member)
-        return self._build_uncertainty_result(clouds, source="aleatoric",
-                              n_samples=n_samples, alpha=alpha, beta=beta)
+        clouds, coefficients = self._build_aleatoric_shape_summaries(X, n_samples, rng, member)
+
+        predictions = self._build_uncertainty_result(
+            clouds, source="aleatoric", n_samples=n_samples, alpha=alpha, beta=beta)
+
+        # Add the coefficents that produced the aleatoric draws to the result
+        predictions["coefficients"] = coefficients
+
+        return predictions
+
 
     @staticmethod
     def rank_by_uncertainty(result):
@@ -682,7 +683,7 @@ class UncertaintyEngine:
     # Implementation with aleatoric draws nested in epistemic ensemble
     ####################################################################
 
-    def _build_combined_shape_summaries(self, X, n_samples, rng):
+    def _build_combined_shape_summaries(self, X, n_samples, rng, keep_coefficients=False):
         """Build every individual's nested cloud of M x n shape summaries.
 
         To analyse the uncertainty profile of epistemic and aleatoric uncertainty,
@@ -699,13 +700,19 @@ class UncertaintyEngine:
             n_samples: int, n; aleatoric draws per member, so each individual's
                 cloud holds M * n summaries in total.
             rng: np.random.Generator driving the draws.
+            keep_coefficients: bool; whether to also return the draws behind the
+                clouds. Off by default because the nested cloud is large (multible GB)
 
         Returns:
-            tuple (clouds, group_ids):
+            tuple (clouds, group_ids, coefficients):
                 clouds: list of length D; element i is that individual's list of
                     M * n summaries, ordered member by member.
                 group_ids: np.ndarray (M * n,) of int; the member index behind
                     each position in every cloud.
+                coefficients: list of M arrays of shape (D, n, B), ordered member
+                    by member to match group_ids, or None. Each block is in THAT
+                    member's normalised units, since ensemble members carry their
+                    own normalisers, so each must be evaluated by its own engine.
         """
         rng = np.random.default_rng(rng)
         # Step 1: For each ensemble member, draw their own n aleatoric summaries for every individual
@@ -714,13 +721,15 @@ class UncertaintyEngine:
         #               [[M1_P0_S0, M1_P0_S1], [M1_P1_S0, M1_P1_S1], ...],  # Model 1
         #            ]
         # M0_P0_S0 = model 0, person 0, aleatoric draw 0.
-        by_member = [
+        drawn = [
             self._build_aleatoric_shape_summaries(X, n_samples, rng, member=m)
             for m in range(len(self.engines))
         ]
+        by_member = [clouds for clouds, _ in drawn]
+        coefficients = [block for _, block in drawn] if keep_coefficients else None
 
         # Step 2: Pool the members' draws into one cloud per individual
-        # Step 2: Regroup by individual and flatten the member axis away, i.e.
+        #  Regroup by individual and flatten the member axis away, i.e.
         #         (M, D, n) -> (D, M * n).
         #            [
         #               [M0_P0_S0, M0_P0_S1, ..., M1_P0_S0, M1_P0_S1, ...],  # Person 0
@@ -738,9 +747,9 @@ class UncertaintyEngine:
         #         between-member (epistemic) contribution to U.
         group_ids = np.repeat(np.arange(len(self.engines)), n_samples)
 
-        return clouds, group_ids
+        return clouds, group_ids, coefficients
 
-    def predict_with_combined_uncertainty(self, X, n_samples, rng, alpha=1/2, beta=1/4):
+    def predict_with_combined_uncertainty(self, X, n_samples, rng, alpha=1/2, beta=1/4,  keep_coefficients=False):
         """Quantify epistemic and aleatoric uncertainty together for every individual.
     
         In this function we consider a case accounting for full predictive uncertainty
@@ -779,37 +788,45 @@ class UncertaintyEngine:
         contributions to U. 
         """
         # Step 1: Build the nested cloud and record which member supplied each draw
-        clouds, group_ids = self._build_combined_shape_summaries(X, n_samples, rng)
+        clouds, group_ids, coefficients = self._build_combined_shape_summaries(
+            X, n_samples, rng, keep_coefficients)
+
 
         # Step 2: Compute uncertainties + profile and consensus for all individuals
         predictions = self._build_uncertainty_result(
             clouds, source="combined", n_samples=len(group_ids),
             alpha=alpha, beta=beta)
 
+
         # Step 3: Attach what the uncertainty decomposition will need
         predictions["group_ids"] = group_ids
         predictions["n_per_member"] = n_samples
+        if coefficients is not None:
+            predictions["coefficients"] = coefficients
 
         return predictions
 
 
-    def predict_combined_trajectories(self, X, times, n_samples, rng):
-        """Predict trajectory values of all draws (aleatoric and epistemic) at `times` for one 
-                  covariate dict x/ batch X.
+    def predict_combined_trajectories(self, result, times):
+        """Evaluate the stored combined draws at `times`.
+
         Args:
-            X: dict mapping each covariate name to an np.ndarray of shape (D,).
+            result: dict from predict_with_combined_uncertainty, called with
+                keep_coefficients=True.
             times: 1-D sequence of N time points in [0, T].
-            n_samples: int, n; aleatoric draws per member.
-            rng: np.random.Generator driving the draws. 
 
         Returns:
             np.ndarray of shape (D, M * n, N); predicted values in original
                 units, ordered member by member to match "group_ids".
+
         """
-        rng = np.random.default_rng(rng)
+        if "coefficients" not in result:
+            raise KeyError("result has no draws; call "
+                           "predict_with_combined_uncertainty(..., "
+                           "keep_coefficients=True)")
 
-        by_member = [engine.predict_aleatoric_trajectories(X, times, n_samples, rng)
-                     for engine in self.engines]          # M blocks of (D, n, N)
+        by_member = [engine.predict_aleatoric_trajectories(block, times)
+                     for engine, block in zip(self.engines, result["coefficients"])]
 
-        return np.concatenate(by_member, axis=1)          # (D, M * n, N)
+        return np.concatenate(by_member, axis=1)      # (D, M * n, N)
 
