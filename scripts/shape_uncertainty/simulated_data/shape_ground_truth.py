@@ -8,6 +8,9 @@ from scripts.shape_uncertainty.shape_extraction.shape_summary import compute_epi
 from scripts.shape_uncertainty.shape_extraction.shape_summary import _absorb_lowest_scoring_episode
 from scripts.shape_uncertainty.shape_extraction.shape_summary import merge_adjacent
 
+from scripts.shape_uncertainty.spline_basis.bspline_basis import basis_matrix
+from scripts.shape_uncertainty.simulated_data.data_generator import WilkersonDGP
+
 
 def _evaluate_wilkerson(t, size, g, d, rho):
     """Evaluate the Wilkerson curve.
@@ -645,58 +648,113 @@ def get_analytic_shape_summary(dataset, upsilon_rel_1, upsilon_rel_2,
     ]
 
 
-
-def estimate_true_random_effects(covariate_values, hyperparams, model, T,
-                           n_mc=20000, rng=None, n_dense=2000):
-    """Estimate the ground-truth aleatoric covariance Sigma at a given
-        covariate vector (NORMAL random effects).
-
-    Estimate the true aleatoric covariance Sigma at a single covariate vector
-    (covariate_values). Sigma is the unexplained between-individual variation in
-    the spline coefficients induced by the unobserved heterogeneity (z_g, z_d) at
-    that covariate point. We draw a large number (n_mc) of latent pairs (z_g, z_d),
-    holding the covariates fixed; each draw yields one noise-free Wilkerson curve.
-    Each curve is then represented in the model's spline coefficient space, and 
-    Sigma is the empirical covariance of the resulting coefficient vectors.
-
-    The representation uses the SAME spline basis / coefficient space the model.
-    Estimation is then performed under idealised conditions:
-        - noise-free curves,
-        - a large number of dense observations,
-    The resulting observed coefficient spread is then pure aleatoric variation the
-    latents induce at this covariate point -- the ground-truth Sigma. We can
-    compare the model's estimated Sigma against this ground truth.
-
-    Two objects are returned: 
-    1. The empirical sample of coefficient vectors (distributional ground truth) 
-    2. Its covariance Sigma
-
-    Note that this function returns Sigma(x). Considering whether this varies
-    will likely show that the model assumption of homoscedasticity of Sigma is
-    false. We are interested in testing whether this is an issue. Furthermore
-    we are interested in exploring whether the assumptions about the distributional
-    form of Sigma is an issue. 
+def _build_spline_projector(basis_functions, T, n_dense=200):
+    """Build the OLS projection machinery for a given B-spline basis.
+    
+    This function precomputes the OLS solution to the B-spline fitting
+    problem such that later we can obtain the OLS coefficients for a
+    given vector of observed outcomes as a simple matrix multiplication.
 
     Args:
-        covariate_values: dict of scalar covariate values (size, age, weight,
-            dosage); the covariate point at which the random effects are evaluated.
-        hyperparams: dict of generative hyperparameters (for compute_parameters).
-        model: the trained model providing the spline coefficient representation.
-        T: scalar time horizon.
-        n_mc (int): number of latent draws (z_g, z_d) in the Monte-Carlo estimate.
-        rng: np.random.Generator for the latent draws.
-        n_dense (int): number of dense, noise-free observation times per curve.
+        basis_functions: The B-spline basis to be evaluated.
+        T (float): The right endpoint of the time grid (from 0 to T).
+        n_dense (int): The number of evenly spaced evaluation times 
+            on [0, T]. Defaults to 200.
 
     Returns:
-        coeffs: np.ndarray of shape (n_mc, B); the sampled spline coefficient
-            vectors, i.e. the assumption-free distributional ground truth.
-        Sigma: np.ndarray of shape (B, B); the empirical covariance of coeffs.
+        dict: A dictionary containing the projection machinery with keys:
+            - "times" (np.ndarray): The evaluation time grid.
+            - "Phi" (np.ndarray): The design matrix evaluated at the grid points.
+            - "projector" (np.ndarray): The pseudo-inverse of the design matrix.
     """
-    pass
+    # Step 1: Set the grid points
+    times = np.linspace(0.0, T, n_dense)
+    
+    # Step 2: Compute the design matrix (basis functions evaluated at grid points)
+    Phi = basis_matrix(times, basis_functions)
+
+    # Step 3: Compute the pre-solved OLS formula
+    projector = np.linalg.pinv(Phi)
+    
+    return {"times": times, "Phi": Phi, "projector": projector}
+
+
+def estimate_true_random_effects(covariate_values, hyperparams, basis_functions, T,
+                                 n_mc=5000, rng=None, n_dense=200):
+    """Estimate the ground-truth aleatoric covariance Sigma at a given covariate vector.
+
+    Sigma is the unexplained variation in the spline coefficients induced by 
+    the unobserved heterogeneity (z_g, z_d) at a fixed covariate point. This 
+    function seeks to obtain an estimate of this 'true' aleatoric covariance. 
+    
+    We obtain this estimate at a FIXED covariate vector as follows:
+
+    Step 1: Draw `n_mc` latent pairs (z_g, z_d) ~ N(0,1). 
+    Step 2: Obtain the ground truth trajectories for each latent pair.
+    Step 3: Represent each curve in the model's spline coefficient space.
+    Step 4: Compute Sigma as the empirical covariance of the coefficient vectors.
+
+    Note that this function returns Sigma(x) at a fixed x. Exploring whether 
+    this varies across different x might show that the model's assumption of 
+    homoscedasticity of Sigma is false. We are interested in testing whether 
+    this is an issue. Furthermore, we are interested in exploring whether the 
+    assumptions about the distributional form of the random effects are an issue.
+
+    Args:
+        covariate_values (dict): Scalar covariate values (size, age, weight,
+            dosage); the covariate point at which the random effects are evaluated.
+        hyperparams (dict): Generative hyperparameters for the data-generating process.
+        basis_functions (callable or object): The B-spline basis defining the 
+            coefficient space.
+        T (float): The right endpoint of the forecasting horizon.
+        n_mc (int, optional): Number of latent draws (z_g, z_d) in the Monte-Carlo 
+            estimate. Defaults to 5000.
+        rng (np.random.Generator or int, optional): Random number generator or seed 
+            for the latent draws. Defaults to None.
+        n_dense (int, optional): Number of dense, noise-free observation times 
+            per curve. Defaults to 200.
+
+    Returns:
+        dict: A dictionary containing:
+            - "coefficients" (np.ndarray of shape (n_mc, B)): The sampled spline 
+              coefficient vectors.
+            - "Sigma" (np.ndarray of shape (B, B)): The empirical covariance of 
+              the coefficient vectors.
+    """
+    rng = np.random.default_rng(rng)
+
+    # Step 0: Build machinery to obtain spline coefficients
+    proj = _build_spline_projector(basis_functions, T, n_dense)
+    times = proj["times"]
+    P = proj["projector"]
+
+    # Step 1: Duplicate all scalar covariates into arrays of length n_mc
+    covariates = {name: np.full(n_mc, value) for name, value in covariate_values.items()}
+
+    # Step 2: Draw n_mc latent values and map them to the Wilkerson rate parameters
+    dgp = WilkersonDGP(T=T, hyperparams=hyperparams)
+    latents = {"z_g": rng.normal(size=n_mc), "z_d": rng.normal(size=n_mc)}
+    params = dgp._compute_parameters(covariates, latents)
+
+    # Step 3: Evaluate all n_mc noise-free curves Y at once.
+    t = times.reshape(1, -1) # (200,)  -> (1, 200)
+    size = covariates["size"].reshape(-1, 1) # (5000,) -> (5000, 1)
+    g = params["g"].reshape(-1, 1)
+    d = params["d"].reshape(-1, 1)
+    rho = params["rho"].reshape(-1, 1)
+    
+    Y = dgp._compute_wilkerson(t, size, g, d, rho)
+
+    # Step 4: Obtain the spline coefficients using preconstructed OLS machinery
+    coefficients = Y @ P.T                      
+
+    return {
+        "coefficients": coefficients,
+        "Sigma": np.cov(coefficients, rowvar=False),
+    }
 
 
 # The following functions will probably want to be moved to evaluation:
-
 def evaluate_random_effects_at_point(coeffs, model, covariate_values):
     """Characterise the shape of the ground-truth random-effects distribution.
 
