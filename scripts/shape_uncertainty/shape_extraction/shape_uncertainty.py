@@ -334,3 +334,46 @@ def medoid_summary(summaries, T, profile, alpha=1/2, beta=1/4):
     medoid_index = _determine_medoid(member_distances)
 
     return summaries[medoid_index], medoid_index
+
+
+def decompose_shape_uncertainty(profile, T, group_ids, alpha=1/2, beta=1/4):
+    """Split one cloud's shape uncertainty into aleatoric and epistemic parts.
+
+    Operates on a cloud built by nesting S aleatoric draws inside each of E
+    ensemble members. Writing <a, b>_d = sum_sigma sum_sigma' a(sigma) b(sigma')
+    d(sigma, sigma') and n_k^(e) for member e's state histogram on region k,
+
+        Q_k^ale   = mean_e <n_k^(e), n_k^(e)>_d / (S (S - 1))
+        Q_k^cross = (<N_k, N_k>_d - sum_e <n_k^(e), n_k^(e)>_d) / (E (E-1) S^2)
+        Q_k^epi   = Q_k^cross - Q_k^ale
+
+    Q^ale averages pairs drawn from the SAME member, which share that member's
+    mean shape and differ only by the random effect, so it is pure aleatoric
+    spread. Q^cross averages pairs from DIFFERENT members, which carry both the
+    model gap and that same spread; subtracting cancels the spread and leaves
+    model disagreement alone. This is the law of total variance, not an analogy.
+
+    Do not read the raw within/between pair split instead: cross pairs outnumber
+    within pairs by roughly (E-1)S to 1, so any pair-count weighting is "between"
+    almost by construction. The subtraction removes exactly that artefact.
+
+    Note the identity is Q^tot = Q^ale + ((E-1)S / (ES-1)) Q^epi, so additivity
+    against the pooled U holds up to that factor (0.990 at E = S = 100).
+
+    Args:
+        profile: dict as returned by compute_shape_uncertainty for the POOLED
+            cloud. Its regions come from the union of transition points over all
+            E * S summaries, so every component is weighted by the same L_k.
+            Calling this per member instead would give each its own region grid.
+        T: float, the right endpoint of the forecasting horizon.
+        group_ids: np.ndarray (E * S,) of int; the member behind each cloud
+            position, aligned with the rows of profile["state_indices"].
+        alpha: float, slope disagreement weight.
+        beta: float, curvature disagreement weight.
+
+    Returns:
+        dict with "U_aleatoric", "U_epistemic", "U_cross" (floats),
+            "Q_aleatoric", "Q_epistemic" (np.ndarray (n_regions,)) and
+            "reducible_fraction", U_epi / (U_ale + U_epi).
+    """
+    pass
