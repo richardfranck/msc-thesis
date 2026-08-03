@@ -404,12 +404,16 @@ class SimulatedDataset:
             )
         return np.vstack(self.Y_noisy)
 
-    def _select_individuals(self, idx):
+    def select_individuals(self, idx):
         """Return a new SimulatedDataset with only the selected individuals.
 
         Args:
             idx: 1-D array of int; the individual indices to keep, in
                 the order they should appear in the returned dataset.
+
+        Note:
+        The function permits indices to repeat, in which case the corresponding
+        individual appears more than once. We use this for bootstrap resampling.
 
         Returns:
             SimulatedDataset: a new dataset of len(indices) individuals
@@ -451,7 +455,7 @@ class SimulatedDataset:
         """
         if d > self.D:
             raise ValueError
-        return self._select_individuals(np.arange(d))
+        return self.select_individuals(np.arange(d))
 
     def split_test_val_train(self, D_train, D_val, D_test):
         """Split the simulated dataset into test, validation, and training sets.
@@ -487,9 +491,9 @@ class SimulatedDataset:
             )
 
         # Step 3: Carve the three contiguous, non-overlapping regions
-        test = self._select_individuals(np.arange(0, D_test))
-        val = self._select_individuals(np.arange(D_test, D_test + D_val))
-        train = self._select_individuals(np.arange(D_test + D_val, self.D))
+        test = self.select_individuals(np.arange(0, D_test))
+        val = self.select_individuals(np.arange(D_test, D_test + D_val))
+        train = self.select_individuals(np.arange(D_test + D_val, self.D))
 
         return Split(test=test, val=val, train=train)
 
@@ -518,7 +522,7 @@ class SimulatedDataset:
         if indices is None:
             selected = self
         else:
-            selected = self._select_individuals(indices)
+            selected = self.select_individuals(indices)
 
         # Step 2: Give every selected individual the same evaluation grid
         times_per_individual = [times] * selected.D
@@ -551,9 +555,11 @@ class SimulatedDataset:
         Returns:
             list of length D; element i is {covariate_name: value} for individual i.
         """
-        names = list(self.X.keys())
-        return [{name: self.X[name][i] for name in names} for i in range(self.D)]
-
+        return [
+            {name: np.asarray([column[i]], dtype=float)
+             for name, column in self.X.items()}
+            for i in range(self.D)
+        ]
 
 def _make_regular_observation_times(N, T):
     """Evenly spaced grid of N points on [0, T] (one individual)."""
