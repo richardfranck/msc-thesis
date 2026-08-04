@@ -198,6 +198,17 @@ class InferenceEngine:
     #######     Aleatoric uncertainty for a single model            ######
     ######################################################################
 
+    @property
+    def noise_std_hat(self):
+        """Return the fitted measurement-noise std sigma in original y units.
+
+        
+        Returns:
+            float; the fitted measurement-noise standard deviation.
+        """
+        with torch.no_grad():
+            return float(self.model.get_noise_std()) * self.normaliser.y_std
+
     def _cholesky_factor(self):
         """Return the cholesky factor L of the random-effects covariance.
 
@@ -223,34 +234,70 @@ class InferenceEngine:
         # Step 3: Return the cholesky facotor
         with torch.no_grad():
             return self.model.cholesky_factor().detach()
-    
-    @property
-    def sigma_hat(self):
-        """Return the trained random-effects covariance Sigma = L L^T.
 
-        Return the estimated aleatoric variance covariance matrix for examination
-        (not for sampling).
-        On data generated without unobserved heterogeneity this should be zero.
+    @property
+    def sigma_0_hat(self):
+        """Return the trained shared shape Sigma_0 = L L^T.
 
         Returns:
             np.ndarray of shape (B, B); symmetric positive-definite.
         """
         L = self._cholesky_factor()
-        return (L @ L.T).cpu().numpy()
+        return (L @ L.T).cpu().numpy()  # NORMALISED unity
 
-
-    def _draw_random_effects(self, nr_individuals, n_samples, rng):
-        """Draw random-effect vectors u ~ N(0, Sigma).
-
-        Draw the a sepcified number of random-effect vectors (n_samples) for 
-        the specified number of individuals (e.g. for everyone in the test set).
-        While every draw comes from the same distribution u ~ N(0, Sigma), we make
-        independent n_samples draws for each individual. 
-        Draws come from 
-                    u = L z with z ~ N(0, I)
+    def random_effect_scales(self, X):
+        """Return each individual's fitted random-effects scale s(x).
 
         Args:
-            nr_individuals: int, D; how many individuals to draw for.
+            X: dict mapping each covariate name to an np.ndarray of shape (D,).
+
+        Returns:
+            np.ndarray of shape (D,); strictly positive, in NORMALISED units.
+        """
+        self.model.eval()
+        Z = self.normaliser.transform(X)
+        with torch.no_grad():
+            return self.model.random_effect_scale(Z).cpu().numpy() # NORMALISED unity
+
+    def sigma_hat_per_individual(self, X):
+        """Return each individual's fitted covariance Sigma(x) = s(x)^2 Sigma_0, in ORIGINAL y units.
+
+        Assembles Sigma(x) = s(x)^2 Sigma_0 and converts it out of the model's
+        normalised outcome space, so it can be set directly against a
+        ground-truth covariance.
+
+        Args:
+            X: dict mapping each covariate name to an np.ndarray of shape (D,).
+
+        Returns:
+            np.ndarray of shape (D, B, B), in the model's normalised units.
+        """
+        scales = self.random_effect_scales(X)
+        scales = scales.reshape(-1, 1, 1)
+        sigma_per_individual = scales ** 2 * self.sigma_0_hat # normalised units 
+        sigma_per_individual = sigma_per_individual* self.normaliser.y_std ** 2
+        return sigma_per_individual
+
+    def _draw_random_effects(self, X, n_samples, rng):
+        """Draw random-effect vectors u_i ~ N(0, Sigma(x_i)).
+
+        Draws a specified number of random-effect vectors (n_samples) for each
+        individual in X (e.g. for everyone in the test set). Draws are
+        independent across individuals and across samples.
+
+        The covariance is heteroscedastic, Sigma(x) = s(x)^2 Sigma_0, so a draw
+        is built in two stages, shape first and magnitude second:
+
+            u = s(x) * L z,     z ~ N(0, I),
+
+        where L is the Cholesky factor of the SHARED shape (Sigma_0 = L L^T,
+        with unit trace) and s(x) is the individual's own scale. The first stage
+        gives every individual the same correlation structure; the second gives
+        each one its own size.
+
+        Args:
+            X: dict mapping each covariate name to an np.ndarray of shape (D,)
+                holding that covariate's value for all D individuals.
             n_samples: int, n; draws per individual.
             rng: np.random.Generator or int seed.
 
@@ -262,13 +309,19 @@ class InferenceEngine:
 
         # Step 2: Draw standard normals, one B-vector per (individual, sample)
         L = self._cholesky_factor() # (B, B)
+        nr_individuals = len(next(iter(X.values()))) # scalar D
         nr_basis = L.shape[0] # scalar B
         z = rng.standard_normal((nr_individuals, n_samples, nr_basis)) # (D, n, B) i.i.d. N(0,1), numpy float64
         z = torch.as_tensor(z, dtype=L.dtype) # same values, cast to L's dtype
 
         # Step 3: Correlate draw through the Cholesky factor.
-        # Here z is a row vector so z L^T gives Cov(u) = L L^T = Sigma.
-        return z @ L.T # (D, n, B)
+        # Here z is a row vector so z L^T gives Cov(u) = L L^T = Sigma_0
+        u_unit_scale = z @ L.T # (D, n, B)
+
+        # Step 4: Give each individual its own magnitude
+        scales = torch.as_tensor(self.random_effect_scales(X), dtype=L.dtype) # (D,)
+
+        return scales[:, None, None]  * u_unit_scale # (D, 1, 1) * (D, n, B) = (D, n, B)
 
     ######################################################################
     # ------------------------- Aleatoric Prediction ---------------------
@@ -305,7 +358,7 @@ class InferenceEngine:
         H = self._get_mean_coefficients(X) # (D, B)
 
         # Step 2: Draw the random effects for the whole batch
-        U = self._draw_random_effects(H.shape[0], n_samples, rng)  # (D, n, B)
+        U = self._draw_random_effects(X, n_samples, rng)  # (D, n, B)
 
         # Step 3: Perturb each individual's mean by each of its draws
         W = H.unsqueeze(1) + U # (D, 1, B) + (D, n, B) = (D, n, B)

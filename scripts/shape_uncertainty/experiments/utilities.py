@@ -78,7 +78,9 @@ def load_run(path=".", model_cls=GaussianModel):
         hidden_sizes=tuple(best["hidden_sizes"]),
         activation=best["activation"],
         dropout=best["dropout"],
+        nr_random_effect_outputs=model_cls.NR_RANDOM_EFFECT_OUTPUTS,
     )
+    
     model = model_cls(encoder, knot_objects["nr_basis"])
     model.load_state_dict(torch.load(os.path.join(path, "model.pt"), weights_only=True))
     model.eval()

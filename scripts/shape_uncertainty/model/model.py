@@ -33,9 +33,12 @@ class Encoder(nn.Module):
         activation: Activation function used in every hidden layer.
         dropout: Dropout probability used after each hidden-layer
             activation.
+          nr_random_effect_outputs: Number of additional per-individual outputs emitted
+            alongside the B coefficients. The Gaussian model takes one to model 
+            the log scale of its random effects to model heteroscedastisity.
     """
     def __init__(self, nr_covariates, nr_basis, hidden_sizes=(32, 64, 32),
-                 activation="relu", dropout=0.0):
+                 activation="relu", dropout=0.0, nr_random_effect_outputs=0):
         super().__init__()
 
         if activation not in ACTIVATIONS:
@@ -67,9 +70,13 @@ class Encoder(nn.Module):
 
             in_dim = hidden_dim
 
-        # Define the output layer that produces the B spline coefficients.
+        # Define the output layer that produces the B spline coefficients,
+        # plus extra per-individual quantities (like s(x) for the random effects 
+        # model). Callers slice the result.  
         # No batch normalization, activation, or dropout after this layer.
-        self.output = nn.Linear(in_dim, nr_basis)
+        self.nr_basis = nr_basis
+        self.nr_random_effect_outputs = nr_random_effect_outputs
+        self.output = nn.Linear(in_dim, nr_basis + nr_random_effect_outputs)
 
 
     # Forward pass
@@ -81,8 +88,9 @@ class Encoder(nn.Module):
                 static covariates.
 
         Returns:
-            Tensor of shape (batch, B), containing the spline coefficients
-            h_theta(x).
+            Tensor of shape (batch, B + nr_random_effect_outputs), containing the
+            spline coefficients h_theta(x) in the first B columns, followed by any
+            random-effects outputs the model asked for.
         """
         layers = zip(
             self.hidden_layers,
@@ -127,6 +135,9 @@ class RandomEffectsModel(nn.Module, ABC):
         encoder: an Encoder instance (the mean map h_theta).
         nr_basis: int, B, the spline coefficient dimension.
     """
+    # How many outputs beyond the B coefficients this model needs from its encoder. 
+    NR_RANDOM_EFFECT_OUTPUTS = 0
+
     def __init__(self, encoder, nr_basis, sigma_init=0.1):
             super().__init__()
             self.encoder = encoder
@@ -170,7 +181,7 @@ class RandomEffectsModel(nn.Module, ABC):
             scalar torch.Tensor; the batch-averaged mean-trajectory wiggle.
         """
         # Mean coefficients for the whole batch
-        H = self.encoder(X) # (D, B)
+        H = self.get_coefficients(X) # (D, B)
 
         # Quadratic form h_i^T Omega h_i for every individual and take the mean
         wiggle_per_individual = (H @ Omega * H).sum(dim=1) # (D,)
@@ -230,46 +241,77 @@ class RandomEffectsModel(nn.Module, ABC):
 class GaussianModel(RandomEffectsModel):
     """Random-effects model with Gaussian random effect.
 
-    In this model we assume the random effects u_i ~ N(0, Sigma). As a result,
-        y_i | x_i ~ N( Phi_i h_theta(x_i),  Phi_i Sigma Phi_i^T + sigma^2 I ),
-    such that the log-likelihood has a closed-form. To things to note are:
+    In this model we assume heteroscedastic random effects 
 
-    In the log-likelihood, we parameterise Sigma through its Cholesky factor L 
-    (Sigma = L L^T), where L is a lower triangual matrix. To ensure that Sigma 
-    is symmetric positive-definite and optimisation problem is unconstrianed we
-    parameterise the elements on the main diagonal as the exponensial.
-    For example,
-            [[l_11, 0   , 0    ],     [[exp(d_1), 0       , 0       ],
-        L = [ l_21, l_22, 0    ],   = [a_21,      exp(d_2), 0       ],
-            [ l_31, l_32, l_33]]      [a_31,      a_32    , exp(d_3)]]
-    or generally,
-        l_ij = exp(d_i)    if i == j,
-        l_ij = a_ij        if i > j,
-        l_ij = 0           if i < j.
+                    u_i ~ N(0, Sigma(x_i)),        Sigma(x) = s(x)^2 Sigma_0,
 
-    We solve for the unconstrained parameters:
-        a_ij = l_ij        for i > j,
-        d_i  = log(l_ii)   for i == j.
+    where Sigma_0 = L L^T is a SHARED shape with unit trace and s(x) > 0 is a
+    per-individual scale read off one extra encoder output. 
+    Therefore,
 
+        y_i | x_i ~ N( Phi_i h_theta(x_i),
+                       s(x_i)^2 Phi_i Sigma_0 Phi_i^T + sigma^2 I ),
+    such that the log-likelihood has a closed-form. 
+
+
+    Things to note:
+
+    1. Heteroscedasticity modelling:
+       The heteroscedasticiy Sigma(x) is modelled such that only the MAGNITUDE  
+       of the random effecs is individual-specific. That is, Sigma_0 is a shared
+       shape and s(x) > 0 a per-individual scale, read off an extra encoder output. 
+
+    2. Modelling of the shared shape Sigma_0
+       In the log-likelihood, we parameterise Sigma_0 through its Cholesky factor L 
+       (Sigma_0 = L L^T), where L is a lower triangual matrix. To ensure that Sigma_0 
+       is symmetric positive-definite and optimisation problem is unconstrianed we
+       parameterise the elements on the main diagonal as the exponensial.
+       For example,
+               [[l_11, 0   , 0    ],     [[exp(d_1), 0       , 0       ],
+           L = [ l_21, l_22, 0    ],   = [a_21,      exp(d_2), 0       ],
+               [ l_31, l_32, l_33]]      [a_31,      a_32    , exp(d_3)]]
+       or generally,
+             l_ij = exp(d_i)    if i == j,
+             l_ij = a_ij        if i > j,
+          l_ij = 0           if i < j.
+       We solve for the unconstrained parameters:
+           a_ij = l_ij        for i > j,
+           d_i  = log(l_ii)   for i == j.
+
+       Sigma_0 is implemended to have a UNIT TRACE.
+
+    3. The scaling factor s(x): 
+       The scale splits into a global level and an individual deviation,
+           log s(x) = a(x) + beta,      s(x) = exp(beta) * exp(a(x)),
+       with a(x) the encoder's extra output and beta held outside the encoder.
+       Weight decay reaches encoder parameters only, so it flattens a(x) toward
+       homoscedasticity without also dragging the overall magnitude toward the
+       arbitrary value s = 1. Detailed argument in __init__ below.
+    
     We add a roughness penalty that penalises wiggles in the forecast trajectory
     as measured by the integral over the trajectories squared second derivatives. 
     Expected roughness splits into two components that we regularise separately:
+
         mean-trajectory roughness  h_theta(x_i)^T Omega h_theta(x_i)  [depends on theta]
-        random-effects roughness   tr(Omega Sigma)                    [depends on Sigma]
+        random-effects roughness   E[s(x)^2] tr(Omega Sigma_0)   [depends on Sigma_0, s]
 
     Args:
-        encoder: an Encoder instance.
-        nr_basis (int): Number B of spline basis functions and coefficient dimensions.
-        sigma_init (float): Strictly positive initial value of the measurement-noise
-            standard deviation sigma.
-        sigma_cov_init (float): Strictly positive initial value initial random-effects
-            standard deviations. 
+        encoder: an Encoder instance, built with NR_RANDOM_EFFECT_OUTPUTS extra outputs so
+            that it emits the scale alongside the B coefficients.
+        nr_basis (int): Number B of spline basis functions and coefficient
+            dimensions.
+        sigma_init (float): Strictly positive initial value of the
+            measurement-noise standard deviation sigma.
+        sigma_cov_init (float): Strictly positive initial random-effects SCALE,
+            i.e. exp(beta) at initialisation. With unit-trace Sigma_0 this starts
+            the model at tr(Sigma(x)) = sigma_cov_init^2.
     """
+    # How many outputs beyond the B coefficients this model needs from its encoder. 
+    NR_RANDOM_EFFECT_OUTPUTS = 1
 
     def __init__(self, encoder, nr_basis, sigma_init=0.1, sigma_cov_init=0.1):
         super().__init__(encoder, nr_basis, sigma_init=sigma_init)
-        
-
+    
         if sigma_cov_init <= 0:
             raise ValueError("sigma_cov_init must be positive.")
 
@@ -286,9 +328,82 @@ class GaussianModel(RandomEffectsModel):
         self.log_diag = nn.Parameter(
             torch.full(size=(B,), fill_value=initial_log_diagonal)
         )
-   
+
+        # Global level of the random-effects scale, held OUTSIDE the encoder so
+        # that weight decay cannot reach it.
+        #
+        # Write the encoder's scale output as a(x) = v^T g(x) + b, with g(x) the
+        # last hidden layer. Decay shrinks both v and b. In the no-signal limit:
+        #   v -> 0  gives a(x) -> b, constant across individuals. WANTED: absent a
+        #           differentiating signal in x we should fall back to
+        #           homoscedasticity.
+        #   b -> 0  gives s(x) -> exp(0) = 1, so Sigma(x) -> Sigma_0. NOT wanted:
+        #           it pins that fallback at an arbitrary magnitude, since nothing
+        #           distinguishes s = 1 on a log scale.
+        #
+        # An undecayed beta separates the two. Decay still flattens a(x), but the
+        # level exp(beta) is set by the data, so with no signal in x the model
+        # reduces to Sigma(x) = exp(2 beta) Sigma_0 -- homoscedastic at the
+        # magnitude the data imply. 
+        self.log_scale_offset = nn.Parameter(
+            torch.tensor(math.log(float(sigma_cov_init)))) # log_scale_offset initialised at sigma_cov_init=0.1
+
+
+    def _coefficients_and_log_scale(self, X):
+        """Run the encoder once and split its output into its two parts.
+
+        The encoder emits B mean coefficients followed by one scale column. This
+        method splits them.
+
+        Args:
+            X: torch.Tensor of shape (D, M); normalised covariates.
+
+        Returns:
+            tuple (coefficients, log_scale):
+                coefficients: torch.Tensor (D, B); the mean coefficients
+                    h_theta(x), one row per individual.
+                log_scale: torch.Tensor (D,); log s(x), already carrying the
+                    global level beta, so exp of it is the individual's scale.
+        """
+        outputs = self.encoder(X)
+
+        coefficients = outputs[:, :self.nr_basis] # B spline coefficents. 
+        log_scale = outputs[:, self.nr_basis] + self.log_scale_offset # log s(x) = a(x) + beta,
+
+        return coefficients, log_scale
+
+    def get_coefficients(self, X):
+        """Return the mean spline coefficients h_theta(x).
+
+        Since the encoder emits B + 1 columns, we overwrite the base implementation, 
+        to split the encoder output and return the B coefficents.
+
+        Args:
+            X: torch.Tensor of shape (D, M); normalised covariates.
+
+        Returns:
+            torch.Tensor of shape (D, B); the mean coefficients.
+        """
+        return self._coefficients_and_log_scale(X)[0]
+
+    def random_effect_scale(self, X):
+        """Return each individual's random-effects scale s(x) > 0.
+
+        Return the quantity that makes the model heteroscedastic.
+
+        Args:
+            X: torch.Tensor of shape (D, M); normalised covariates.
+
+        Returns:
+            torch.Tensor of shape (D,); strictly positive.
+        """
+        return torch.exp(self._coefficients_and_log_scale(X)[1])
+
     def cholesky_factor(self):
-        """Assemble the lower-triangular BxB Cholesky factor L with diag = exp(log-diag)."""
+        """Assemble the lower-triangular BxB Cholesky factor L with diag = exp(log-diag).
+
+        Note that we normalise L to by the Frobenius norm, so Sigma_0 = L L^T has unit trace.
+        """
         B = self.nr_basis
         # Create matrix of zeros that matches the data type and hardware location of log_diag.
         L = torch.zeros(B, B, dtype=self.log_diag.dtype, device=self.log_diag.device)
@@ -299,12 +414,39 @@ class GaussianModel(RandomEffectsModel):
         # Replace the lower triangular part with the elements a_ij of self.offdiag.
         L[self._row_indices, self._col_indices] = self.offdiag
 
-        return L
+        # Normalise L so Sigma_0 = L L^T has unit trace.
+        # To achieve this we normalise L by the Frobenius norm. All magnitude this lives in s(x).
+        normalised_L = L / torch.sqrt((L * L).sum())
 
-    def sigma_matrix(self):
-        """Return the (B, B) aleatoric covariance Sigma = L L^T (symmetric PD)."""
+        return normalised_L
+
+    def sigma_0(self):
+        """Return the shared Sigma_0 = L L^T.
+
+        Sigma_0 carries the direction and relative structure of the random 
+        effects, common to everyone. 
+        The matrix is normalised to have unit trace. 
+
+        Returns:
+            torch.Tensor of shape (B, B); symmetric positive-definite, trace 1.
+        """
         L = self.cholesky_factor()
         return L @ L.T
+
+    def sigma_matrix_per_individual(self, X):
+        """Return each individual's own random-effects covariance Sigma(x).
+
+        Assembles Sigma(x) = s(x)^2 Sigma_0 from the shared shape and the
+        individual scale. 
+        Args:
+            X: torch.Tensor of shape (D, M); normalised covariates.
+
+        Returns:
+            torch.Tensor of shape (D, B, B); one symmetric positive-definite
+                covariance per individual.
+        """
+        scales = self.random_effect_scale(X)
+        return scales[:, None, None] ** 2 * self.sigma_0() # Sigma(x) = s(x)^2 * Sigma_0
 
     def marginal_log_likelihood(self, y_i, Phi_i, x_i):
         """Closed-form Gaussian marginal log-likelihood for one individual.
@@ -313,7 +455,7 @@ class GaussianModel(RandomEffectsModel):
             y_i | x_i ~ N(mu_i, V_i),
         where
             mu_i = Phi_i h_theta(x_i),
-            V_i  = Phi_i Sigma Phi_i^T + sigma^2 I
+            V_i  = s(x_i)^2 Phi_i Sigma_0 Phi_i^T + sigma^2 I
 
         Args:
             y_i: torch.Tensor of shape (N_i,); the individual's observed
@@ -325,19 +467,22 @@ class GaussianModel(RandomEffectsModel):
         Returns:
             scalar torch.Tensor; the marginal log-likelihood log p(y_i | x_i).
         """
-        # Assemble the random-effects covariance Sigma = L L^T.
-        Sigma = self.sigma_matrix()
+        # Assemble the shared shape Sigma_0 = L L^T.
+        Sigma_0 = self.sigma_0()
 
         # Get the mean spline coefficients h_theta(x_i). Since the encoder expects a batch, we add/remove a batch dimension.
-        h = self.encoder(x_i.unsqueeze(0)).squeeze(0)  # (M,) -> (1, M) -> (1, B) -> (B,)
+        H, log_s = self._coefficients_and_log_scale(x_i.unsqueeze(0)) # (M,) -> (1, M) -> (1, B) and (1,)
+        h = H.squeeze(0) # (1, B) -> (B,)
+        s_squared = torch.exp(2.0 * log_s.squeeze(0))  # (1,) -> ()
 
         # Get the mean trajectory mu_i = Phi_i h_theta(x_i) at the N_i observation times.
         mu_i = Phi_i @ h
 
-        # Get the marginal covariance V_i = Phi_i Sigma Phi_i^T + sigma^2 I.
+        # Get the marginal covariance V_i = s_i^2 Phi_i Sigma_0 Phi_i^T + sigma^2 I.
         N_i = y_i.shape[0]
         identity_N_i = torch.eye(N_i, dtype=y_i.dtype, device=y_i.device)
-        V_i = Phi_i @ Sigma @ Phi_i.T + self.get_noise_variance() * identity_N_i
+        V_i = (s_squared * (Phi_i @ Sigma_0 @ Phi_i.T)
+               + self.get_noise_variance() * identity_N_i)
 
         # Create a multivariate normal distribution parameterised by the mean vector mu_i and the covariance matrix V_i.
         dist = torch.distributions.MultivariateNormal(mu_i, covariance_matrix=V_i)
@@ -345,19 +490,20 @@ class GaussianModel(RandomEffectsModel):
         # Return log p(y_i|x_i) using the multivariate Gaussian avaluated at the observed y_i.
         return dist.log_prob(y_i)
 
-    def re_wiggle(self, Omega):
-        """Random-effects wiggle tr(Omega Sigma).
+    def re_wiggle(self, X, Omega):
+        """Random-effects wiggle E[s(x)^2] tr(Omega Sigma_0).
 
-        The expected wigggle contributed by the random effects u_i ~ N(0, Sigma).
-        Depends on Sigma only.
+        The expected wiggle contributed by the random effects u_i ~ N(0,
+        Sigma(x_i)), averaged over the batch. 
 
         Args:
+            X: torch.Tensor of shape (D, M); the batch of (normalised) covariates.
             Omega: torch.Tensor of shape (B, B); the spline penalty matrix.
 
         Returns:
-            scalar torch.Tensor; tr(Omega Sigma).
+            scalar torch.Tensor; E[s(x)^2] tr(Omega Sigma_0).
         """
-        return torch.trace(Omega @ self.sigma_matrix())
+        return (self.random_effect_scale(X) ** 2).mean() * torch.trace(Omega @ self.sigma_0())
 
 
     def penalty(self, Omega, X, lambda_mean, lambda_re):
@@ -376,7 +522,7 @@ class GaussianModel(RandomEffectsModel):
             scalar torch.Tensor; the total weighted wiggle penalty.
         """
         return (lambda_mean * self.mean_wiggle(X, Omega)
-                + lambda_re * self.re_wiggle(Omega))
+                + lambda_re * self.re_wiggle(X, Omega))
 
     def batch_log_likelihood(self, batch):
         """Per-individual marginal log-likelihood (D,) for equal-N batches.
@@ -406,18 +552,23 @@ class GaussianModel(RandomEffectsModel):
             raise ValueError("batch_log_likelihood requires equal observation counts per individual.")
 
         # Step 2: Generate spline coefficient matrix and stack the design matrices.
-        H = self.encoder(batch.X).unsqueeze(-1)  # (D, B) -> (D, B, 1)
+        H, log_s = self._coefficients_and_log_scale(batch.X) # (D, B) and (D,)
+        H = H.unsqueeze(-1) # (D, B) -> (D, B, 1)
+        S_squared = torch.exp(2.0 * log_s).view(-1, 1, 1)  # (D, 1, 1)
         Phi = torch.stack(batch.Phi_list, dim=0)  # (D, N, B)
 
         # Step 3: Compute the mean trajectory (MU) using batch matrix multiplication.
         MU = torch.bmm(Phi, H).squeeze(-1)  # (D, N, 1) -> (D, N)
 
-        # Step 4: Build each individual's marginal covariance V_d = Phi_d Sigma Phi_d^T + sigma^2 I.
-        Sigma = self.sigma_matrix()  # (B, B)
+        # Step 4: Build each individual's marginal covariance
+        #         V_d = s_d^2 Phi_d Sigma_0 Phi_d^T + sigma^2 I. Only the scale
+        #         is per-individual; the shape Sigma_0 is shared.
+        Sigma_0 = self.sigma_0()  # (B, B), unit trace
         N = Phi.shape[1]
         identity_N = torch.eye(N, dtype=Phi.dtype, device=Phi.device)  # (N, N)
-        PhiSigma = Phi @ Sigma  # (D, N, B)
-        V = torch.bmm(PhiSigma, Phi.transpose(1, 2)) + self.get_noise_variance() * identity_N  # (D, N, N)
+        PhiSigma = Phi @ Sigma_0  # (D, N, B)
+        V = (S_squared * torch.bmm(PhiSigma, Phi.transpose(1, 2))
+             + self.get_noise_variance() * identity_N)  # (D, N, N)
 
         # Step 5: Create a batched multivariate normal parameterised by the means (MU)
         # and the per-individual marginal covariances (V).
