@@ -292,6 +292,64 @@ class WilkersonDGP(BaseDGP):
 
         return process_config
 
+    # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+    # Methods for computing the covariate-explainable variation in the DGP
+    # used in accuracy_ceilings.py
+    # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+
+    def resample_parameters(self, X, n_mc, rng):
+        """Redraw the process parameters at a fixed set of covariates.
+
+        In the presence of unobserved heterogeneity, a covariate vector does
+        not pin down the process parameters. Instead, controlled the random 
+        latent factors (z_g, z_d) induces a distribution over these parameters.
+        This function estimates this distribution via Monte Carlo estimation.
+        We hold the covariates fixed and redrawing the latent factors n_mc times.
+        Spefically:
+
+        Step 1: Draw n_mc latent pairs (z_g, z_d) ~ N(0,1) for every individual
+                (i.e. at fixed covariates)
+        Step 2: Map each (covariates, latent pair) to process parameters via the
+                same deterministic map used for data generation.
+        Step 3: Stack the draws so that each parameter carries one row per
+                individual and one column per draw.
+
+        Things to note:
+        1. With alpha_g = alpha_d = 0, there is no unobserved heterogeneity and
+        every draw returns identical parameter values.
+        This is can be used as a correctness check. 
+        2. Rho depends on dosage alone, so it is constant across the draw axis 
+        by construction.
+        
+        Args:
+            X (dict): Covariate name to np.ndarray of shape (D,), the covariate
+                vectors held fixed across draws.
+            n_mc (int): Number of latent draws per individual.
+            rng (np.random.Generator or int): Random number generator or seed for
+                the latent draws.
+
+        Returns:
+            dict: Parameter name to np.ndarray of shape (D, n_mc), containing:
+                - "g": growth rate of the resistant fraction.
+                - "d": decay rate of the sensitive fraction.
+                - "rho": treatment-sensitive fraction, constant across draws.
+        """
+        rng = np.random.default_rng(rng)
+
+        # Get the number of individuals D
+        D = len(next(iter(X.values())))
+
+        # Generate parameter draws 
+        draws = []
+        for _ in range(n_mc):
+            # Step 1: Draw latent factors for all individuals.
+            latents = self._sample_latents(D, rng)
+            # Step 2L Map (covariates, latent factors) to process parameters for this draw.
+            draws.append(self._compute_parameters(X, latents))
+
+        # Step 3: Stack individual draws 
+        return {name: np.stack([draw[name] for draw in draws], axis=1)
+                for name in draws[0]}
 
 class SimulatedDataset:
     """A simulated panel dataset with model-visible and ground-truth data.
@@ -725,4 +783,3 @@ def generate_simulated_dataset(dgp, D, N=20, sigma=0.0, regular=True,
     )
 
     return dataset
-
