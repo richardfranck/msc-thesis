@@ -68,7 +68,7 @@ def _evaluate_wilkerson_double_prime(t, size, g, d, rho):
 
 
 
-def _compute_critical_point(g, d, rho):
+def compute_critical_point(g, d, rho):
     """Return the stationary point t* of the Wilkerson curve.
 
     The wilkerson curve is strictly convex, so y' has at most one root at
@@ -101,7 +101,7 @@ def _compute_critical_point(g, d, rho):
     # Step 3: Cmpute the root. 
     return float(np.log(numerator / denominator) / (d + g))
 
-def _compute_true_curve_amplitude(size, g, d, rho, T, t_star):
+def compute_true_curve_amplitude(size, g, d, rho, T):
     """Compute exact peak-to-peak amplitude of the convex Wilkerson curve on [0, T].
 
     Since y is strictly convex, it has at most one interior minimum at t_star.
@@ -117,12 +117,13 @@ def _compute_true_curve_amplitude(size, g, d, rho, T, t_star):
         d: scalar, decay rate of the sensitive fraction.
         rho: scalar, treatment-sensitive fraction in (0, 1).
         T: scalar, time horizon so the curve is considered on [0, T].
-        t_star: scalar, location of the interior minimum (root of y'); used only
-            to decide whether the minimum falls within (0, T).
 
     Returns:
         A: float, the peak-to-peak amplitude max(y) - min(y) over [0, T].
     """
+    # Step 0: Locate the interior minimum
+    t_star = compute_critical_point(g, d, rho) # np.nan if no interior minimum
+
     # Step 1: Get a np.array of dimension (D,) of lists of candidate points.
     #           The candidate points are both endpoints, plus the interior minimum if applicable.
     ts = [0.0, T]
@@ -591,10 +592,10 @@ def get_analytic_shape_summary_single(size, g, d, rho, T, upsilon_rel_1=0.0,
             (state, start_time) tuples.
     """
     # Step 1: Compute the critical point
-    t_star = _compute_critical_point(g, d, rho)
+    t_star = compute_critical_point(g, d, rho)
 
     # Step 2: Compute the amplitude and the absolute thresholds
-    A = _compute_true_curve_amplitude(size, g, d, rho, T, t_star)
+    A = compute_true_curve_amplitude(size, g, d, rho, T)
     upsilon_1, upsilon_2 = absolute_thresholds(upsilon_rel_1, upsilon_rel_2, A, T)
     upsilon_prune = upsilon_rel_prune * A
 
