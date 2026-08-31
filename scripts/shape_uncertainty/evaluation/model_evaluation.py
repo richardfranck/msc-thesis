@@ -7,6 +7,11 @@ from scripts.shape_uncertainty.shape_extraction.shape_distance import (
     mean_shape_summary_distance,
 )
 
+from scripts.shape_uncertainty.evaluation.evaluation_metrics import (
+    compute_RMSE, compute_individual_RMSE,
+    compute_R_squared, compute_individual_R_squared)
+
+
 class ModelEvaluator:
     """Assess a trained model's fit and shape extraction on a simulated test dataset.
 
@@ -46,107 +51,6 @@ class ModelEvaluator:
         # Return the saved list of predicted trajectories
         return self.predicted
 
-    def _compute_RMSE(self, predicted, reference):
-        """Compute the root mean squared error (RMSE) 
-
-        Compute the RMSE between all predicted and reference (noise-free/observed) 
-        trajectories for all samples in a dataset. 
-
-        Args:
-            predicted: np.ndarray of shape (M,); predicted trajectory values.
-            reference: np.ndarray of shape (M,); reference trajectory values.
-
-        Returns:
-            rmse (float): the root mean squared error over the M entries.
-        """
-        mse = np.mean((predicted - reference) ** 2)
-        rmse = np.sqrt(mse)
-        return rmse
-
-    def _compute_individual_RMSE(self, predicted, reference):
-        """Compute the root mean squared error (RMSE) of each individual.
-
-        The trajectories of different individuals may operate on different
-        scales. An aggregate RMSE may hide poor fit by some individuals.
-        This function therefore computes the RMSE of each individual based 
-        on their own observation times. 
-        For individual i with N_i observations,
-
-            RMSE_i = sqrt( (1 / N_i) * sum_n (predicted_in - reference_in)^2 ).
-
-        That is,`_compute_RMSE` restricted to the residuals of a single 
-        individual.
-
-        Args:
-            predicted: list of length D; element i is an np.ndarray of shape
-                (N_i,) holding the predicted values for individual i.
-            reference: list of length D; element i is an np.ndarray of shape (N_i,)
-                holding the reference (noise-free or observed) values for individual i.
-
-        Returns:
-            np.ndarray of shape (D,); element i is the RMSE of individual i,
-                in the order the individuals are held in the dataset.
-        """
-        return np.array([
-            self._compute_RMSE(np.asarray(p), np.asarray(y))
-            for p, y in zip(predicted, reference)
-        ])
-
-    def _compute_R_squared(self, predicted, reference):
-        """Compute the R-squared value for the predicted trajectory.
-
-        Recall that R^2 = 1 - RSS/TSS
-
-        Args:
-            predicted: np.ndarray of shape (M,); predicted trajectory values.
-            reference: np.ndarray of shape (M,); reference (noise-free or observed) 
-            trajectory values.
-
-        Returns:
-            r_squared (float): r_squared value. 
-        """
-        rss = np.sum((reference - predicted) ** 2)
-        tss = np.sum((reference - reference.mean()) ** 2)
-        r_squared = 1 - (rss/tss)
-        return r_squared
-
-    def _compute_individual_R_squared(self, predicted, reference):
-        """Compute the R-squared value of each individual.
-
-        The trajectories of different individuals may operate on different
-        scales. An aggregate R-squared may hide poor fit by some individuals.
-        This function therefore computes the R-squared of each individual based 
-        on their own observation times. 
-        For individual i with N_i observations,
-
-            R^2_i = 1 - sum_n (reference_in - predicted_in)^2
-                        / sum_n (reference_in - mean(reference_i))^2,
-
-        with mean(reference_i) = (1 / N_i) * sum_n reference_in.
-
-        Note:
-        An individual whose referene trajectory is constant over its observation
-        times R-squared is undefined due to a zero denominator. In that case, 
-        we report np.nan, to prevent corrupting the computation of an average
-        R-square taken over individuals.
-
-        Args:
-            predicted: list of length D; element i is an np.ndarray of shape
-                (N_i,) holding the predicted values for individual i.
-            reference: list of length D; element i is an np.ndarray of shape (N_i,)
-                holding the reference (noise-free or observed) values for individual i.
-
-        Returns:
-            np.ndarray of shape (D,); element i is the R-squared of individual
-                i, or np.nan where that individual's trajectory is constant.
-        """
-        r_squared = []
-        for p, y in zip(predicted, reference):
-            p, y = np.asarray(p), np.asarray(y)
-            tss = np.sum((y - y.mean()) ** 2)
-            r_squared.append(self._compute_R_squared(p, y) if tss > 0 else np.nan)
-        return np.array(r_squared)
-
     def compute_value_space_metrics(self, predicted=None, target="observed"):
         """Compute pooled and per-individual RMSE and R-squared of predicted
         vs reference (noise-free or observed).
@@ -178,8 +82,11 @@ class ModelEvaluator:
                 "r2" (float): R-squared pooled over all D * N_i residuals,
                     taken about the population mean.
                 "mean_individual_rmse" (float): (1 / D) * sum_i RMSE_i.
+                "median_individual_rmse" (float): the median of RMSE_i.
                 "mean_individual_r2" (float): (1 / D*) * sum_i R^2_i, averaged
                     over the D* individuals whose R-squared is defined.
+                "median_individual_r2" (float): the median of R^2_i over the
+                    same D* individuals.
                 "individual_rmse" (np.ndarray): shape (D,); RMSE_i.
                 "individual_r2" (np.ndarray): shape (D,); R^2_i, np.nan where
                     the individual's reference trajectory is constant.
@@ -202,16 +109,16 @@ class ModelEvaluator:
             predicted = self.get_trajectory_estimates()
 
         # Step 2: Score each individual on its own observation times
-        individual_rmse = self._compute_individual_RMSE(predicted, reference)
-        individual_r_squared = self._compute_individual_R_squared(predicted, reference)
+        individual_rmse = compute_individual_RMSE(predicted, reference)
+        individual_r_squared = compute_individual_R_squared(predicted, reference)
 
         # Step 3: Pool residuals across individuals (handles ragged N_i)
         predicted_all = np.concatenate([np.asarray(p) for p in predicted])
         reference_all = np.concatenate([np.asarray(y) for y in reference])
 
         # Compute pooled RMSE and R-squared
-        rmse = self._compute_RMSE(predicted_all, reference_all)
-        r_squared = self._compute_R_squared(predicted_all, reference_all)
+        rmse = compute_RMSE(predicted_all, reference_all)
+        r_squared = compute_R_squared(predicted_all, reference_all)
 
         # Return value space metrics
         metrics = {
@@ -219,7 +126,9 @@ class ModelEvaluator:
             "rmse": rmse,
             "r2": r_squared,
             "mean_individual_rmse": float(np.mean(individual_rmse)),
+            "median_individual_rmse": float(np.median(individual_rmse)),
             "mean_individual_r2": float(np.nanmean(individual_r_squared)),
+            "median_individual_r2": float(np.nanmedian(individual_r_squared)),
             "individual_rmse": individual_rmse,
             "individual_r2": individual_r_squared,
         }
