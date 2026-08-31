@@ -3,12 +3,19 @@ import numpy as np
 
 # Shape extraction utilities
 from scripts.shape_uncertainty.shape_extraction.shape_summary import extract_shape_summary
-from scripts.shape_uncertainty.spline_basis.bspline_basis import basis_matrix
+from scripts.shape_uncertainty.spline_basis.bspline_basis import (
+    basis_matrix,
+    pointwise_sd_from_covariance,
+)
 
 # Uncertainty utilities
 from scripts.shape_uncertainty.shape_extraction.shape_uncertainty import (
     compute_shape_uncertainty,
     medoid_summary,
+)
+
+from scripts.shape_uncertainty.shape_extraction.value_uncertainty import (
+    compute_value_uncertainty,
 )
 
 def build_inference_engine(model, normaliser, knot_objects, shape_config):
@@ -425,6 +432,64 @@ class InferenceEngine:
         # Step 2: Return to original units
         Y = self.normaliser.inverse_transform_y(Y_norm)
         return Y
+
+    ######################################################################
+    # -------------- Aleatoric Value-Space Uncertainty ------------------
+    ######################################################################
+
+    def predict_aleatoric_band(self, X, times):
+        """Return the pointwise value-space aleatoric sd implied by the fitted Sigma(x).
+
+        The conversion from coefficient-space covariance to value-space
+        uncertainty is given by
+            Var_j(t) = phi(t)^T Sigma_j phi(t)
+        and
+            SD_j(t) = sqrt(phi(t)^T Sigma_j phi(t)),
+        where Sigma_j is the individual's random-effect covariance matrix and
+        phi(t) is the basis-function vector evaluated at time t.
+
+            DERIVATION:
+                The random effects for individual i are
+                        u_i ~ N(0, Sigma_i).
+                The model is
+
+                        y_i = phi(t)^T (h(x) + u_i)
+                            = phi(t)^T h(x) + phi(t)^T u_i.
+                Therefore, the contribution of the random effects to the outcome
+                in value space is phi(t)^T u_i. For conciseness, let phi(t) = phi
+                denote the basis functions evaluated at the observation times.
+                        Var(phi^T u_i)
+                            = E[(phi^T u_i)^2] - E[phi^T u_i]^2.
+                Since phi is non-random and E[u_i] = 0,
+                        E[phi^T u_i] = phi^T E[u_i] = 0,
+                and therefore
+                        Var(phi^T u_i)
+                            = E[(phi^T u_i)^2]
+                            = E[(phi^T u_i)(phi^T u_i)^T]
+                            = E[phi^T u_i u_i^T phi]
+                            = phi^T E[u_i u_i^T] phi
+                            = phi^T Sigma_i phi.
+
+                Thus, phi^T Sigma_i phi is the pointwise value-space aleatoric
+                variance, and its square root is the corresponding standard
+                deviation.
+
+        Args:
+            X: dict mapping each covariate name to an np.ndarray of shape (D,).
+            times: 1-D np.ndarray of shape (M,); the times at which to evaluate,
+                shared by every individual.
+
+        Returns:
+            np.ndarray of shape (D, M); element [d, m] is individual d's
+                aleatoric standard deviation at times[m], in original y units.
+        """
+        # Step 1: Assemble each individual's covariance, in original y units
+        Sigma = self.sigma_hat_per_individual(X)                    # (D, B, B)
+
+        # Step 2: Carry it into value space at the requested times
+        return pointwise_sd_from_covariance(
+            Sigma, times, self.knot_objects["basis_functions"])     # (D, M)
+
 
 
 class UncertaintyEngine:
@@ -860,13 +925,16 @@ class UncertaintyEngine:
         return predictions
 
 
-    def predict_combined_trajectories(self, result, times):
+    def predict_combined_trajectories(self, result, times, indices=None):
         """Evaluate the stored combined draws at `times`.
 
         Args:
             result: dict from predict_with_combined_uncertainty, called with
                 keep_coefficients=True.
             times: 1-D sequence of N time points in [0, T].
+            indices: optional 1-D array-like of int; which individuals to
+                evaluate. Defaults to all D.
+
 
         Returns:
             np.ndarray of shape (D, M * n, N); predicted values in original
@@ -878,8 +946,147 @@ class UncertaintyEngine:
                            "predict_with_combined_uncertainty(..., "
                            "keep_coefficients=True)")
 
+
+        # Step 1: Slice selected individuals
+        blocks = result["coefficients"]
+        if indices is not None:
+            blocks = [block[indices] for block in blocks]
+
+        # Step 2: Evaluate trajectories per engine
         by_member = [engine.predict_aleatoric_trajectories(block, times)
-                     for engine, block in zip(self.engines, result["coefficients"])]
+                     for engine, block in zip(self.engines, blocks)]
 
-        return np.concatenate(by_member, axis=1)      # (D, M * n, N)
+        # Step 3: Combine Results
+        return np.concatenate(by_member, axis=1) # (len(indices), M * n, N)
 
+    ####################################################################
+    # Value-space uncertainty
+    ####################################################################
+
+    def _build_value_uncertainty_result(self, curves, times, references, source,
+                                        n_samples=None, keep_curves=False):
+        """Score every individual's cloud of trajectories in value space.
+
+        This is the value-space counterpart of _build_uncertainty_result. 
+
+        Given a clouds of trajectories, compute an uncertainty score as the mean
+        pairwise absolute value-space distance. 
+
+        Args:
+            curves: np.ndarray of shape (D, M, N); every individual's cloud of M
+                trajectories on a shared grid of N times, in original y units.
+            times: np.ndarray of shape (N,); the evaluation grid, evenly spaced
+                and running from 0 to the horizon.
+            references: sequence of length D of int; the medoid trajectory of each
+                clourd (as the shape-space result records in "selected_indices").
+            source: str; "epistemic", "aleatoric" or "combined". Recorded on the
+                result so that clouds measured under different regimes are not
+                compared.
+            n_samples: int or None; the cloud size M, where the source has such
+                a parameter.
+            keep_curves: bool; whether each profile keeps the trajectories it
+                was scored from. Off by default due to data size.
+
+        Returns:
+            dict with keys:
+                "V":          np.ndarray (D,); value-space uncertainty per
+                              individual, each the fraction of that individual's
+                              amplitude its cloud spans on average.
+                "profiles":   list of length D of value-uncertainty profiles, as
+                              returned by compute_value_uncertainty.
+                "amplitudes": np.ndarray (D,); the A each profile was divided
+                              by, read back from the profiles.
+                "times":      np.ndarray (N,); the shared evaluation grid.
+                "T", "source", "n_samples": the conditions everything was
+                              computed under.
+        """
+        # Step 1: Score each individual's cloud against its own amplitude
+        D = len(curves)
+        V = np.empty(D, dtype=float)
+        profiles = []
+
+        for i in range(D):
+            V[i], profile = compute_value_uncertainty(
+                curves[i], times, references[i])
+
+            # The profile carries its own cloud so that it can be decomposed later.
+            if not keep_curves:
+                profile.pop("curves")
+
+            profiles.append(profile)
+
+        # Step 2: Build the results dictionary
+        return {"V": V,
+                "profiles": profiles,
+                "amplitudes": np.array([p["amplitude"] for p in profiles]),
+                "times": times,
+                "T": self.T,
+                "source": source,
+                "n_samples": n_samples}
+
+
+    def predict_with_epistemic_value_uncertainty(self, X, times, references,
+                                                keep_curves=False):
+        """Quantify epistemic uncertainty in value space for every individual.
+
+        This function is th value-space counterpart of predict_with_epistemic_uncertainty. 
+
+        Args:
+            X: dict mapping each covariate name to an np.ndarray of shape (D,)
+                holding that covariate's value for all D individuals.
+            times: np.ndarray of shape (N,); the evaluation grid, evenly spaced
+                and running from 0 to the horizon.
+            references: sequence of length D of int; the medoid trajectory of each
+                clourd (as the shape-space result records in "selected_indices").
+            keep_curves: bool; whether each profile keeps its own cloud.
+
+        Returns:
+            dict as described in _build_value_uncertainty_result, with source
+                "epistemic".
+        """
+        # Step 1: Evaluate every member's trajectory for every individual
+        curves = self.predict_epistemic_trajectories(X, times)   # (D, M, N)
+
+        # Step 2: Score each individual's cloud
+        return self._build_value_uncertainty_result(
+            curves, times, references, source="epistemic",
+            n_samples=len(self.engines), keep_curves=keep_curves)
+
+
+    def predict_with_combined_value_uncertainty(self, result, times, references,
+                                                indices=None, keep_curves=False):
+        """Quantify combined uncertainty in value space for every individual.
+
+        This function is the value-space counterpart of predict_with_combined_uncertainty, i.e. 
+        just like predict_with_epistemic_value_uncertainty but now for both sources.
+
+        Args:
+            result: dict from predict_with_combined_uncertainty, called with
+                keep_coefficients=True.
+            times: np.ndarray of shape (N,); the evaluation grid, evenly spaced
+                and running from 0 to the horizon.
+            references: sequence of length D of int; the medoid trajectory of each
+                clourd (as the shape-space result records in "selected_indices").
+            indices: optional 1-D array-like of int; which individuals to score.
+                Defaults to all D, which is only affordable in chunks.
+            keep_curves: bool; whether each profile keeps its own cloud.
+
+        Returns:
+            dict as described in _build_value_uncertainty_result, with source
+                "combined" and one extra key:
+                    "group_ids": np.ndarray (M * n,) of int; the member behind
+                                 each cloud position, carried through so the
+                                 result can later be decomposed.
+        """
+        # Step 1: Evaluate trajectories
+        curves = self.predict_combined_trajectories(result, times, indices)
+
+        # Step 2: Score each individual's cloud
+        predictions = self._build_value_uncertainty_result(
+            curves, times, references, source="combined",
+            n_samples=len(result["group_ids"]), keep_curves=keep_curves)
+
+        # Step 3: Preserve group info
+        predictions["group_ids"] = result["group_ids"]
+
+        return predictions
