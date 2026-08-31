@@ -311,6 +311,70 @@ def build_knot_dictionary(nr_interior_knots, T):
             "nr_basis": nr_interior_knots + 4}
 
 
+def pointwise_sd_from_covariance(Sigma_stack, times, basis_functions):
+    """Compute the pointwise standard deviation a coefficient covariance implies.
+
+    In the context of the Gaussian model, covariance over spline coefficients 
+    is not directly interpretable. Therefore, this function carries a covariance 
+    into value space, where it becomes the width of the band around the curve.
+
+    The conversion from coefficient-space covariance to value-space
+    uncertainty is given by
+            Var_j(t) = phi(t)^T Sigma_j phi(t)
+    and
+            SD_j(t) = sqrt(phi(t)^T Sigma_j phi(t)),
+    where Sigma_j is the individual's random-effect covariance matrix and
+    phi(t) is the basis-function vector evaluated at time t.
+
+        DERIVATION:
+            The random effects for individual i are
+                        u_i ~ N(0, Sigma_i).
+            The model is
+
+                        y_i = phi(t)^T (h(x) + u_i)
+                            = phi(t)^T h(x) + phi(t)^T u_i.
+            Therefore, the contribution of the random effects to the outcome
+            in value space is phi(t)^T u_i. For conciseness, let phi(t) = phi
+            denote the basis functions evaluated at the observation times.
+                        Var(phi^T u_i)
+                            = E[(phi^T u_i)^2] - E[phi^T u_i]^2.
+            Since phi is non-random and E[u_i] = 0,
+                        E[phi^T u_i] = phi^T E[u_i] = 0,
+            and therefore
+                        Var(phi^T u_i)
+                            = E[(phi^T u_i)^2]
+                            = E[(phi^T u_i)(phi^T u_i)^T]
+                            = E[phi^T u_i u_i^T phi]
+                            = phi^T E[u_i u_i^T] phi
+                            = phi^T Sigma_i phi.
+
+            Thus, phi^T Sigma_i phi is the pointwise value-space aleatoric
+            variance, and its square root is the corresponding standard
+            deviation.
+
+    Args:
+        Sigma_stack: np.ndarray of shape (D, B, B) holding one covariance
+            matrix per individual.
+        times: 1-D np.ndarray of shape (M,); the times at which to evaluate,
+            shared by every individual in the stack.
+        basis_functions: the B-spline basis defining the coefficient space.
+
+    Returns:
+        np.ndarray of shape (D, M); element [d, m] is individual d's pointwise
+            standard deviation at times[m], in whatever units Sigma_stack is
+            expressed in.
+    """
+    # Step 2: Evaluate the basis once, on the grid shared by every individual
+    Phi = basis_matrix(times, basis_functions) # (M, B)
+
+    # Step 3: Take the quadratic form at every time, one individual at a time.
+    band_sd = []
+    for Sigma in Sigma_stack:
+        variance = np.sum((Phi @ Sigma) * Phi, axis=1) # (M,)
+        band_sd.append(np.sqrt(np.maximum(variance, 0.0)))
+
+    return np.stack(band_sd) # (D, M)
+
 
 if __name__ == "__main__":
     knots = make_knots(2, 5, degree=3)
