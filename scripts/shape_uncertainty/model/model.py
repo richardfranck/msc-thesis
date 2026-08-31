@@ -329,7 +329,7 @@ class GaussianModel(RandomEffectsModel):
             torch.full(size=(B,), fill_value=initial_log_diagonal)
         )
 
-        # Global level of the random-effects scale, held OUTSIDE the encoder so
+        # Global level of the random-effects scale, held outside the encoder so
         # that weight decay cannot reach it.
         #
         # Write the encoder's scale output as a(x) = v^T g(x) + b, with g(x) the
