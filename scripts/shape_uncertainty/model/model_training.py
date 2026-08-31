@@ -122,6 +122,11 @@ def train(model, train_batch, Omega, lambda_mean, lambda_re,
             loss = objective(model, mini_batch, Omega, lambda_mean, lambda_re)
             # Computes gradient of the loss w.r.t. all trainable parameters
             loss.backward()
+
+            # Clip total gradient norm to 10.0 to prevent explosive parameter
+            # updates that crash Cholesky factorisation
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
+
             # Updates the parameters using Adam
             optimiser.step()
 
@@ -321,6 +326,7 @@ class Tuner:
                     hidden_sizes=tuple(hyperparas["hidden_sizes"]),
                     activation=hyperparas["activation"],
                     dropout=hyperparas["dropout"],
+                    nr_random_effect_outputs=self.model_cls.NR_RANDOM_EFFECT_OUTPUTS,
         )
 
         # Step 2: Wrap the encoder in self.model_cls (a RandomEffectsModel) with any
