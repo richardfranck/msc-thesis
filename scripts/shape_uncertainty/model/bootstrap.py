@@ -1,4 +1,3 @@
-
 import os
 import json
 
@@ -7,11 +6,12 @@ import torch
 
 from scripts.shape_uncertainty.model.model import MeanOnlyModel
 from scripts.shape_uncertainty.model.model_training import Tuner
-from scripts.shape_uncertainty.model.model_inference import InferenceEngine
 
 from scripts.shape_uncertainty.spline_basis.bspline_basis import build_knot_dictionary
-from scripts.shape_uncertainty.experiments.utilities import save_run, load_run
-from scripts.shape_uncertainty.model.model_inference import build_inference_engine
+from scripts.shape_uncertainty.model.model_persistence import save_run, load_run
+
+from scripts.shape_uncertainty.model.model_inference import (
+    InferenceEngine, build_inference_engine)
 
 
 class BootstrapEnsemble:
