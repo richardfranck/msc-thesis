@@ -1,8 +1,10 @@
-"""Table 5: shape-state pruning, faithfulness and observed individual R-squared.
+"""Table 5: shape-state pruning and faithfulness.
 
 Note that all shape scores assessed against pruned analytic truth.
 
-    python thesis/thesis_table_5_pruned_truth.py
+Requires: timeview_tumour_homogeneous, meanonly_tumour_homogeneous
+
+    python thesis/thesis_table_5.py
 """
 
 from itertools import groupby
@@ -20,7 +22,6 @@ import config
 import data_loader
 import model_loader
 
-from scripts.shape_uncertainty.evaluation.model_evaluation import ModelEvaluator
 from scripts.shape_uncertainty.model.model import MeanOnlyModel
 from scripts.shape_uncertainty.model.model_inference import (
     build_inference_engine, UncertaintyEngine)
@@ -36,7 +37,7 @@ torch.set_default_dtype(torch.float64)
 # The regime: simulated data without unobserved heterogeneity.
 REGIME = config.REGIME_HOMOGENEOUS
 
-OUTPUT_PATH = THESIS_DIR / "tables" / "thesis_table_5_pruned_truth.tex"
+OUTPUT_PATH = THESIS_DIR / "tables" / "thesis_table_5.tex"
 PRUNED_TRUTH_CONFIG = config.SHAPE_CONFIG
 
 
@@ -54,16 +55,13 @@ SETTINGS = [
     ("Pruning", config.SHAPE_CONFIG),
 ]
 
-# The table's rows, grouped so that a rule separates the three blocks.
+# The table's rows, grouped so that a rule separates the two blocks.
 ROW_GROUPS = [
-    [("estimated_states", "Estimated states per summary", "{:.2f}"),
-     ("true_states", "True states per summary", "{:.2f}"),
+    [("true_states", "Reference states per summary", "{:.2f}"),
+     ("estimated_states", "Estimated states per summary", "{:.2f}"),
      ("sequence_match_rate", "Sequence match rate", "{:.1%}")],
-    [("mean_uncertainty", r"Mean $\overline{U}$", "{:.3f}"),
-     ("median_uncertainty", "Median $U$", "{:.3f}"),
+    [("median_uncertainty", "Median $U$", "{:.3f}"),
      ("share_certain", "Share with $U = 0$", "{:.1%}")],
-    [("median_observed_r2", r"Median $R^2$ (observed)", "{:.3f}"),
-     ("observed_r2_interquartile_range", "Interquartile range", "text")],
 ]
 
 
@@ -225,39 +223,16 @@ def score_shape_uncertainty(engines, test):
         test: SimulatedDataset; the test split.
 
     Returns:
-        dict with keys "mean_uncertainty", "median_uncertainty" and
-            "share_certain", the last being the share of individuals every
-            member agrees on.
+        dict with keys "median_uncertainty" and "share_certain", the last
+            being the share of individuals every member agrees on.
     """
     result = UncertaintyEngine(engines).predict_with_epistemic_uncertainty(
         test.X)
     U = result["U"]
 
     return {
-        "mean_uncertainty": float(np.mean(U)),
         "median_uncertainty": float(np.median(U)),
         "share_certain": float(np.mean(U == 0.0)),
-    }
-
-
-def summarise_observed_individual_r_squared(engine, test):
-    """Summarise observed individual R-squared for one fitted model.
-
-    Args:
-        engine: InferenceEngine; the fitted model to evaluate.
-        test: SimulatedDataset; the held-out observations.
-
-    Returns:
-        dict: The median and interquartile range of observed individual R2.
-    """
-    metrics = ModelEvaluator(engine, test).compute_value_space_metrics(
-        target="observed")
-    individual_r_squared = np.asarray(metrics["individual_r2"], dtype=float)
-    lower, upper = np.nanpercentile(individual_r_squared, [25, 75])
-
-    return {
-        "median_observed_r2": float(np.nanmedian(individual_r_squared)),
-        "observed_r2_interquartile_range": f"{lower:.3f}--{upper:.3f}",
     }
 
 
@@ -277,13 +252,12 @@ def score_pruning_setting(run, ensemble, test, shape_config):
     engine = build_engine_at_pruning(run, shape_config)
     true_summaries = extract_true_summaries(test, PRUNED_TRUTH_CONFIG)
     faithfulness = score_summary_faithfulness(engine, test, true_summaries)
-    observed_r_squared = summarise_observed_individual_r_squared(engine, test)
 
     # Step 2: The ensemble, read for how far its members disagree
     engines = rebuild_member_engines(ensemble, shape_config)
     agreement = score_shape_uncertainty(engines, test)
 
-    return {**faithfulness, **agreement, **observed_r_squared}
+    return {**faithfulness, **agreement}
 
 
 def report_column(column):
@@ -299,7 +273,7 @@ def report_column(column):
           f"states {column['estimated_states']:.2f} "
           f"vs true {column['true_states']:.2f}   "
           f"match {column['sequence_match_rate']:.1%}   "
-          f"mean U {column['mean_uncertainty']:.3f}   "
+          f"median U {column['median_uncertainty']:.3f}   "
           f"share U=0 {column['share_certain']:.1%}", flush=True)
 
 

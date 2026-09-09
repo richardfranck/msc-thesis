@@ -18,8 +18,19 @@ import data_loader
 
 OUTPUT_PATH = THESIS_DIR / "tables" / "thesis_table_3.tex"
 
-# The datasets appear in the order they are introduced in the thesis.
+# The datasets appear in the order they are introduced in the thesis, one
+# column each.
 DATASET_LABELS = ("Tumour", "Flchain", "Airfoil")
+
+# The table's rows. A "text" row carries a value that is already written out,
+# so that the formatting of every other row stays in one place.
+ROWS = [
+    ("individuals", r"Individuals", "{:,}"),
+    ("split_sizes", r"Train / validation / test", "text"),
+    ("covariates", r"Covariates", "{:d}"),
+    ("observations", r"Observation count range", "text"),
+    ("median_coverage", r"Median domain coverage", "{:.1%}"),
+]
 
 
 def load_dataset_splits():
@@ -109,7 +120,7 @@ def summarise_dataset_split(label, split):
             dataset partitions.
 
     Returns:
-        dict: The values required for one rendered table row.
+        dict: The values required for one rendered table column.
     """
     datasets = (split.train, split.val, split.test)
     split_sizes = f"{split.train.D:,} / {split.val.D:,} / {split.test.D:,}"
@@ -125,14 +136,14 @@ def summarise_dataset_split(label, split):
 
 
 def build_dataset_summaries(dataset_splits):
-    """Build the ordered rows of the dataset-summary table.
+    """Build the ordered columns of the dataset-summary table.
 
     Args:
         dataset_splits: dict mapping each printed dataset label to its Split,
             as returned by :func:`load_dataset_splits`.
 
     Returns:
-        list of dict: One summary per dataset, in table order.
+        list of dict: One summary per dataset, in column order.
     """
     return [
         summarise_dataset_split(label, dataset_splits[label])
@@ -140,33 +151,49 @@ def build_dataset_summaries(dataset_splits):
     ]
 
 
+def format_metric(value, spec):
+    """Format one figure to the precision its row is reported at.
+
+    Args:
+        value: int, float or str; the figure to render.
+        spec: str; the row's format string, or ``text`` for a prepared value.
+
+    Returns:
+        str: The formatted figure, safe to place in a LaTex cell.
+    """
+    if spec == "text":
+        return value
+
+    return spec.format(value).replace("%", r"\%")
+
+
 def render_latex_table(summaries):
     """Render the dataset summaries as a booktabs LaTex tabular.
 
+    One column per dataset, one row per reported quantity.
+
     Args:
-        summaries: sequence of dict; the rows to render.
+        summaries: sequence of dict; one summary per dataset, in column order.
 
     Returns:
         str: The complete LaTex tabular environment.
     """
-    lines = [
-        r"\begin{tabular}{lrrrrr}",
-        r"\toprule",
-        (r"Dataset & Individuals & \makecell[c]{Train / validation / test} & "
-         r"Covariates & \makecell[c]{Observations per\\individual} & "
-         r"\makecell[c]{Median domain\\coverage} " + r"\\"),
-        r"\midrule",
-    ]
+    # Step 1: Open the tabular, the label column left, one column per dataset
+    lines = [r"\begin{tabular}{l" + "r" * len(summaries) + "}", r"\toprule"]
 
-    for summary in summaries:
-        lines.append(
-            f"{summary['label']} & {summary['individuals']:,} & "
-            f"{summary['split_sizes']} & {summary['covariates']} & "
-            f"{summary['observations']} & "
-            f"{summary['median_coverage']:.1%} "
-            + r"\\")
+    # Step 2: Head each column with its dataset
+    headings = " & ".join(summary["label"] for summary in summaries)
+    lines.append("Quantity & " + headings + r" \\")
+    lines.append(r"\midrule")
 
+    # Step 3: One row per reported quantity
+    for key, label, spec in ROWS:
+        cells = [format_metric(summary[key], spec) for summary in summaries]
+        lines.append(f"{label} & " + " & ".join(cells) + r" \\")
+
+    # Step 4: Close the tabular
     lines.extend([r"\bottomrule", r"\end{tabular}"])
+
     return "\n".join(lines)
 
 
