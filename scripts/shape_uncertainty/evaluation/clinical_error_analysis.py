@@ -183,6 +183,28 @@ class ClinicalErrorEvaluator:
         consensus, _ = medoid_summary(summaries, self.test.T, profile)
         return consensus
 
+    def get_shape_profile(self, index):
+        """Return the regional shape uncertainty profile of one individual.
+
+        Args:
+            index: int; the individual to read.
+
+        Returns:
+            dict; the uncertainty profile, carrying "regions" and
+                "region_uncertainty" among the keys compute_shape_uncertainty
+                returns.
+        """
+        # Case 1 - ensemble: the result already carries every profile
+        if "profiles" in self.result:
+            return self.result["profiles"][index]
+
+        # Case 2 - nested cloud: score this individual's rebuilt cloud
+        summaries = self._get_individual_cloud(index)
+        _, profile = compute_shape_uncertainty(summaries, self.test.T)
+
+        return profile
+
+
     # ------------------------ Does the trajectory rebound --------------------------
 
     def get_true_rebound_flags(self):
@@ -222,6 +244,29 @@ class ClinicalErrorEvaluator:
         return self._point_flags
 
 
+    def get_point_forecast_monotone_flags(self, slope):
+        """For each individual, determine whether the point forecast carries one
+        slope over the whole horizon.
+
+        A rebound needs a rising state after a falling one, so a summary flagged
+        here reports no rebound.
+
+        Args:
+            slope: str; "decreasing" or "increasing", the direction to require.
+
+        Returns:
+            np.ndarray of shape (D,) and dtype bool.
+        """
+        summaries = self._get_point_forecast_summaries()
+
+        monotone_flags = [
+            bool(summary) and all(state.endswith(slope) for state, _ in summary)
+            for summary in summaries
+        ]
+
+        return np.array(monotone_flags, dtype=bool)
+
+
     def get_consensus_rebound_flags(self):
         """For each individual, determine whether the consensus predicts a rebound fo this indiviual.
 
@@ -255,26 +300,47 @@ class ClinicalErrorEvaluator:
 
 
     def get_missed_rebound_individuals(self):
-        """Return the rebounding individuals the point forecast calls monotone.
+        """Return the rebounding individuals reported as a monotone decline.
 
-        This function returns the individuals in the dataset where the point forecast
-        failed to identify a rebound. 
+        This is the clinically consequential error, since a continuing decline
+        reads as a treatment working.
 
         Returns:
             np.ndarray of int; indices into the test split, ascending.
         """
-        # The truth turns and the forecast says it does not
-        # Get the true and point flags
+        # The truth turns and the forecast reports a decline throughout
+        true_flags = self.get_true_rebound_flags()
+        decline_flags = self.get_point_forecast_monotone_flags("decreasing")
+
+        return np.flatnonzero(true_flags & decline_flags)
+
+
+    def get_misreported_increase_individuals(self):
+        """Return the rebounding individuals reported as a monotone increase.
+
+        These are wrong too, but they deny the response rather than the relapse,
+        and together with the missed rebounds and the detected ones they account
+        for every rebounding individual.
+
+        Returns:
+            np.ndarray of int; indices into the test split, ascending.
+        """
+        true_flags = self.get_true_rebound_flags()
+        increase_flags = self.get_point_forecast_monotone_flags("increasing")
+
+        return np.flatnonzero(true_flags & increase_flags)
+
+
+    def get_detected_rebound_individuals(self):
+        """Return the rebounding individuals the point forecast reports as such.
+
+        Returns:
+            np.ndarray of int; indices into the test split, ascending.
+        """
         true_flags = self.get_true_rebound_flags()
         point_flags = self.get_point_forecast_rebound_flags()
 
-        # Create a flaf for cases where there IS a true rebound, but NO point forecast rebound
-        missed_rebound_mask = true_flags & ~point_flags
-
-        # Get the indices for the identified cases
-        indices = np.flatnonzero(missed_rebound_mask)
-
-        return indices
+        return np.flatnonzero(true_flags & point_flags)
 
 
     def get_detection_population(self):
