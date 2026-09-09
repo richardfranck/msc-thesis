@@ -1,10 +1,6 @@
 """Thesis Figure 4: one individual's forecast, read as a shape summary.
 
-This figure illustrates a static visualisation of the panels needed
-for tri-level transparency:
-    (a) the cloud of trajectories and the consensus draw
-    (b) the consensus shape summary
-    (c) the pointwise shape uncertainty Q(t) over the pooled cloud
+Requires: gaussian_tumour_heterogeneous
 
     python thesis/thesis_figure_4.py
 """
@@ -44,11 +40,14 @@ N_DENSE = config.N_DENSE
 ASPECT = 0.75
 HEIGHT_RATIOS = [2.0, 0.7, 1.4]
 
-# The pooled cloud holds NR_MEMBERS * NR_DRAWS trajectories. Panel (a) draws
-# every CLOUD_STRIDE-th only; every measurement uses all of them. The cloud is
-# drawn fainter than the shared default, so the consensus reads over it.
-CLOUD_STRIDE = 10
-CLOUD_ALPHA = 0.05
+# The pooled cloud holds NR_MEMBERS * NR_DRAWS trajectories. Panel (a) strides
+# it down to about CLOUD_CURVES of them; every measurement still uses all of
+# them. The cloud is drawn fainter than the shared default so the consensus
+# reads over it, but the opacity is set against CLOUD_CURVES rather than the
+# whole cloud: fewer strands overlap, so each has to carry more ink. The same
+# opacity is shared by figures 5 and 7, so the clouds read alike throughout.
+CLOUD_CURVES = 50
+CLOUD_ALPHA = 0.1
 
 # The data regime, matching the ensemble this figure reads.
 REGIME = config.REGIME_HETEROGENEOUS
@@ -134,19 +133,35 @@ def collect_figure_inputs(ensemble, test, coefficients, index):
     }
 
 
-def add_forecast_cloud(axis, times, curves, member, stride=CLOUD_STRIDE):
+def choose_cloud_stride(nr_curves):
+    """Return the stride that draws about CLOUD_CURVES members of a cloud.
+
+    Args:
+        nr_curves: int; how many trajectories the cloud holds.
+
+    Returns:
+        int; the stride to draw at, never below one.
+    """
+    return max(1, nr_curves // CLOUD_CURVES)
+
+
+def add_forecast_cloud(axis, times, curves, member):
     """Draw panel (a): the cloud, with the consensus draw on top of it.
+
+    The cloud is strided down to about CLOUD_CURVES trajectories, so the panel
+    stays legible however many the pooled cloud holds.
 
     Args:
         axis: plt.Axes; the target subplot.
         times: np.ndarray (N,); the evaluation grid.
         curves: np.ndarray (M, N); the pooled cloud.
         member: int; which draw supplied the consensus.
-        stride: int; draw every stride-th member of the cloud.
 
     Returns:
         None
     """
+    stride = choose_cloud_stride(len(curves))
+
     # The consensus is drawn separately, so it is skipped inside the cloud
     skip = member // stride if member % stride == 0 else None
 

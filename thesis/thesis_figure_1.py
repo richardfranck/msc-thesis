@@ -1,10 +1,5 @@
 """Figure 1: Two bases for the same cubic spline space, with two interior knots.
 
-This file draws both bases a cubic spline with two interior knots can be written
-in, in a panel with two elements:
-    (a) the truncated power basis, global and badly scaled
-    (b) the B-spline basis, a set of bumps with local support
-
     python thesis/thesis_figure_1.py
 """
 

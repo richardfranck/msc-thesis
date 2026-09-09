@@ -1,17 +1,6 @@
 """Figure 3: Worked example of the shape extraction algorithm.
 
-This file trains a MeanOnlyModel on a frozen architecture and then visualises the
-workings of the shape extraction algorithm for an example individual in a panel
-with four elements:
-    (a) the fitted trajectory, its observations and the ground truth
-    (b) y' and y'', whose zero crossings generate the candidate transitions
-    (c) the candidate set Gamma, tagged END / KNOT / ROOT
-    (d) the resulting shape-state bands, before and after pruning
-
-The architecture is not searched here. It is read from the run that already
-searched it, so this worked example and the model the thesis reports at share
-one encoder:
-    python thesis/training/train_meanonly_tumour_homogeneous.py
+Requires: meanonly_tumour_homogeneous
 
     python thesis/thesis_figure_3.py
 """
@@ -340,11 +329,7 @@ def plot_shape_extraction(engine, dataset, i, aspect=ASPECT):
     ):
         plot_helpers.add_panel_note(axis, note)
 
-    # Step 7: Guide lines at the surviving transitions, and the state legend
-    transitions = [t_star for _, t_star in summary[1:]]
-    for axis in axes:
-        plot_helpers.add_transition_rules(axis, transitions)
-
+    # Step 7: The state legend
     ax_band.legend(handles=handles, loc="upper center",
                    bbox_to_anchor=(0.5, -0.35), ncol=min(4, len(handles)))
     ax_band.set_xlabel("time $t$")

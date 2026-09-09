@@ -1,15 +1,5 @@
 """Figure 2: Least squares on one individual, in the basis the model uses.
 
-This file fits one individual's trajectory as a linear expansion in a cubic
-B-spline basis, solving for the coefficients by ordinary least squares on that
-individual's observations alone, in a panel with two elements:
-    (a) the fitted trajectory, its observations and the ground truth
-    (b) the shape summary of the generating curve, then of the fitted trajectory
- 
-The basis is the same one the model
-uses, at config.NR_INTERIOR_KNOTS interior knots, so the difference between the
-two figures is what the encoder and its penalty contribute, not the basis.
-
     python thesis/thesis_figure_2.py
 """
 
