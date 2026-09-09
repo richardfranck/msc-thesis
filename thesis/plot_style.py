@@ -1,13 +1,3 @@
-"""Figure style for thesis plots.
-
-The sections are:
-    1.  Geometry
-    2.  Colour
-    3.  Typography
-    4.  Overrides on the science stylesheet
-    5.  Entry points
-"""
-
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 from cycler import cycler

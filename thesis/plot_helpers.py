@@ -56,7 +56,8 @@ def add_true_curve(axis, times, curve):
               label="true curve", zorder=3)
 
 def add_noisy_observations(axis, times, values, label="noisy obs.",
-                           marker_size=3.0, marker_edge_width=0.7, zorder=4):
+                           marker_size=3.0, marker_edge_width=0.7, zorder=4,
+                           color=None):
     """Draw the noisy observations an individual's fit was given onto an axis.
 
     Args:
@@ -68,13 +69,16 @@ def add_noisy_observations(axis, times, values, label="noisy obs.",
         marker_size: float; the marker diameter in points.
         marker_edge_width: float; the marker-outline width in points.
         zorder: float; the drawing order of the observations.
+        color: str or None; marker colour, or None for the shared observation
+            colour.
 
     Returns:
         None
     """
+    marker_color = plot_style.COLORS["observations"] if color is None else color
     axis.plot(times, values, ls="none", marker="o", ms=marker_size,
               mfc="none", mew=marker_edge_width,
-              color=plot_style.COLORS["observations"], label=label,
+              color=marker_color, label=label,
               zorder=zorder)
 
 def add_estimated_curve(axis, times, curve, label="model fit"):

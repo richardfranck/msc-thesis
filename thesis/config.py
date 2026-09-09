@@ -1,18 +1,3 @@
-"""Configurations for thesis experiments. 
-
-The configurations are grouped as follows:
-    1.  Time horizon and data-generating process
-    2.  Dataset sizes
-    3.  Observation design
-    4.  Spline basis
-    5.  Shape extraction
-    6.  Shape distance
-    7.  Regularisation
-    8.  Optimisation, Monte-Carlo budgets and evaluation resolution
-    9.  Seeds
-    10. DGP regimes A, B and C
-"""
-
 from dataclasses import dataclass
 
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
