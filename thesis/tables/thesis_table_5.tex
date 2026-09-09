@@ -1,0 +1,14 @@
+\begin{tabular}{lcccc}
+\toprule
+ & \multicolumn{2}{c}{TimeView} & \multicolumn{2}{c}{Mean-only} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5}
+ & No pruning & Pruning & No pruning & Pruning \\
+\midrule
+Reference states per summary & 1.22 & 1.22 & 1.22 & 1.22 \\
+Estimated states per summary & 4.72 & 1.63 & 3.76 & 1.30 \\
+Sequence match rate & 4.4\% & 69.6\% & 4.0\% & 88.7\% \\
+\addlinespace
+Median $U$ & 0.169 & 0.039 & 0.117 & 0.010 \\
+Share with $U = 0$ & 0.0\% & 18.3\% & 0.0\% & 40.5\% \\
+\bottomrule
+\end{tabular}

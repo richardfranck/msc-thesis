@@ -1,8 +1,5 @@
 """Appendix Table D: Covariates used by the three thesis datasets.
 
-Tumour ranges are the design ranges in config.py. The flchain and airfoil
-ranges and levels are read from the loaded datasets.
-
     python thesis/thesis_table_appendix_D.py
 """
 

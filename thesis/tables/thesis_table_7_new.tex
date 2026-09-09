@@ -1,0 +1,17 @@
+\begin{tabular}{lrr}
+\toprule
+& \multicolumn{1}{c}{\shortstack{Mean-only\\(\textsc{tumour} w/o UH)}}
+& \multicolumn{1}{c}{\shortstack{Random effects\\(\textsc{tumour} w/ UH)}} \\
+\midrule
+\multicolumn{3}{l}{\textit{Shape uncertainty by reference-state count}} \\
+Median $U$ (one reference state) & 0.000 & 0.042 \\
+Median $U$ (two reference states) & 0.104 & 0.118 \\
+\addlinespace
+\midrule
+\multicolumn{3}{l}{\textit{Missed-rebound detection}} \\
+Monotone declining predictions & 537 & 529 \\
+\quad of which the curve rebounds & 24 & 14 \\
+AUROC of $U$ & 0.950 & 0.946 \\
+Fraction flagged at 100\% missed-rebound recall & 20.5\% & 27.4\% \\
+\bottomrule
+\end{tabular}
